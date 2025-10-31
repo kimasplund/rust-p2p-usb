@@ -1,0 +1,33 @@
+# Rust
+/target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+*.log
+config/*.toml
+!config/*.example.toml
+
+# Testing
+dummy_devices/
+test_output/
+
+# Profiling
+flamegraph.svg
+perf.data
+perf.data.old
+
+# Documentation
+book/

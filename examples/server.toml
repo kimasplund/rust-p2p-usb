@@ -1,0 +1,95 @@
+# P2P USB Server Configuration Example
+#
+# This file shows all available configuration options for the p2p-usb-server.
+# Copy this file to ~/.config/p2p-usb/server.toml and customize as needed.
+
+[server]
+# Optional bind address for local API/management interface
+# If not specified, no local interface is created
+# bind_addr = "127.0.0.1:8080"
+
+# Run in service mode (headless, no TUI)
+# Set to true when running as a systemd service
+service_mode = false
+
+# Logging level: trace, debug, info, warn, error
+# Can be overridden with --log-level CLI flag
+log_level = "info"
+
+[usb]
+# Automatically share new USB devices when they are plugged in
+# If false, devices must be manually enabled in the TUI
+auto_share = false
+
+# Device filters (VID:PID patterns)
+# Only devices matching these patterns will be shared
+# Format: "0xVVVV:0xPPPP" where VVVV is vendor ID and PPPP is product ID
+# Use "*" as wildcard (e.g., "0x1234:*" for all devices from vendor 0x1234)
+# Empty list means all devices are available (but not auto-shared unless auto_share=true)
+filters = [
+    # Examples:
+    # "0x1234:0x5678",  # Specific device
+    # "0xabcd:*",       # All devices from vendor 0xabcd
+    # "*:0x0001",       # All devices with product ID 0x0001
+]
+
+[security]
+# List of approved client node IDs (Iroh public keys)
+# Only clients in this list can connect to the server
+# Empty list means all clients are rejected (secure default)
+#
+# To get your client's node ID:
+#   1. Run: p2p-usb-client
+#   2. Copy the NodeId from the startup log
+#   3. Add it to this list
+approved_clients = [
+    # Example format (these are NOT real node IDs):
+    # "ed25519:abc123def456...",
+    # "ed25519:789ghi012jkl...",
+]
+
+# Require explicit approval for new clients
+# If true, only clients in approved_clients can connect
+# If false, any client can connect (NOT RECOMMENDED for production)
+require_approval = true
+
+[iroh]
+# Optional: Custom Iroh relay servers for NAT traversal
+# If not specified, uses Iroh's default relay servers
+# Only needed if you're running your own relay infrastructure
+# relay_servers = [
+#     "https://relay.example.com",
+#     "https://relay2.example.com",
+# ]
+
+# USAGE EXAMPLES:
+#
+# 1. Run with this config:
+#    p2p-usb-server --config examples/server.toml
+#
+# 2. Copy to default location:
+#    mkdir -p ~/.config/p2p-usb
+#    cp examples/server.toml ~/.config/p2p-usb/server.toml
+#    p2p-usb-server
+#
+# 3. Run as systemd service:
+#    # Edit service_mode = true in config
+#    p2p-usb-server --service
+#
+# 4. List USB devices:
+#    p2p-usb-server --list-devices
+#
+# 5. Override log level:
+#    p2p-usb-server --log-level debug
+
+# SECURITY BEST PRACTICES:
+#
+# 1. Always use require_approval = true in production
+# 2. Keep approved_clients list up to date
+# 3. Use specific device filters instead of sharing all devices
+# 4. Monitor logs for unauthorized connection attempts
+# 5. Run with minimal privileges (use udev rules instead of root)
+# 6. Consider firewall rules to restrict network access
+#
+# For more information, see:
+# https://github.com/yourusername/rust-p2p-usb/docs/SECURITY.md

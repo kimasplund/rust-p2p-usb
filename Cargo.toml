@@ -1,0 +1,84 @@
+[workspace]
+members = [
+    "crates/protocol",
+    "crates/common",
+    "crates/server",
+    "crates/client",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+authors = ["rust-p2p-usb contributors"]
+license = "MIT"
+repository = "https://github.com/yourusername/rust-p2p-usb"
+
+[workspace.dependencies]
+# Protocol and serialization
+serde = { version = "1.0", features = ["derive"] }
+postcard = { version = "1.0", features = ["alloc"] }
+bytes = "1.8"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Async runtime (Latest: 1.48.0 - January 2025)
+tokio = { version = "1.48", features = ["full"] }
+async-channel = "2.3"
+
+# Networking (Latest: 0.94.0 - January 2025)
+iroh = "0.94"
+
+# USB
+rusb = "0.9"
+
+# TUI (Latest: 0.29.0)
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Config
+toml = "0.8"
+dirs = "5.0"
+shellexpand = "3.1"
+
+# Platform-specific (Linux)
+nix = { version = "0.29", features = ["ioctl"] }
+
+[profile.dev]
+opt-level = 0
+debug = true
+split-debuginfo = "unpacked"
+strip = false
+debug-assertions = true
+overflow-checks = true
+lto = false
+panic = "unwind"
+incremental = true
+codegen-units = 256
+
+[profile.release]
+opt-level = 3
+debug = false
+split-debuginfo = "off"
+strip = true
+debug-assertions = false
+overflow-checks = false
+lto = "thin"
+panic = "abort"
+incremental = false
+codegen-units = 16
+
+[profile.bench]
+inherits = "release"
+lto = true
+codegen-units = 1

@@ -1,0 +1,88 @@
+# P2P USB Client Configuration Example
+#
+# This file shows all available configuration options for the p2p-usb-client.
+# Copy this file to ~/.config/p2p-usb/client.toml and customize as needed.
+
+[client]
+# Automatically connect to approved servers on startup
+# If true, the client will attempt to connect to all servers in approved_servers
+# If false, you must manually connect via TUI or --connect flag
+auto_connect = true
+
+# Logging level: trace, debug, info, warn, error
+# Can be overridden with --log-level CLI flag
+log_level = "info"
+
+[servers]
+# List of approved server node IDs (Iroh public keys)
+# The client will only connect to servers in this list
+# Empty list means you must manually specify server with --connect flag
+#
+# To get a server's node ID:
+#   1. Start the server: p2p-usb-server
+#   2. Copy the NodeId from the startup log
+#   3. Add it to this list
+approved_servers = [
+    # Example format (these are NOT real node IDs):
+    # "ed25519:abc123def456...",  # My Raspberry Pi server
+    # "ed25519:789ghi012jkl...",  # My office server
+]
+
+[iroh]
+# Optional: Custom Iroh relay servers for NAT traversal
+# If not specified, uses Iroh's default relay servers
+# Only needed if you're running your own relay infrastructure
+# relay_servers = [
+#     "https://relay.example.com",
+#     "https://relay2.example.com",
+# ]
+
+# USAGE EXAMPLES:
+#
+# 1. Run with this config:
+#    p2p-usb-client --config examples/client.toml
+#
+# 2. Copy to default location:
+#    mkdir -p ~/.config/p2p-usb
+#    cp examples/client.toml ~/.config/p2p-usb/client.toml
+#    p2p-usb-client
+#
+# 3. Connect to specific server:
+#    p2p-usb-client --connect ed25519:abc123...
+#
+# 4. Run with debug logging:
+#    p2p-usb-client --log-level debug
+#
+# 5. Run without auto-connect:
+#    # Edit auto_connect = false in config
+#    p2p-usb-client
+
+# CONFIGURATION WORKFLOW:
+#
+# 1. First-time setup:
+#    - Run client to get your NodeId
+#    - Add your NodeId to server's approved_clients list
+#    - Add server's NodeId to this approved_servers list
+#    - Restart both client and server
+#
+# 2. Connecting to a new server:
+#    - Get server's NodeId
+#    - Add to approved_servers list
+#    - Ensure server has your NodeId in approved_clients
+#    - Reconnect or restart client
+#
+# 3. Managing multiple servers:
+#    - Add all server NodeIds to approved_servers
+#    - Set auto_connect = true to connect to all on startup
+#    - Or use --connect to connect to specific server
+
+# SECURITY CONSIDERATIONS:
+#
+# 1. Only add trusted servers to approved_servers
+# 2. Keep the list up to date
+# 3. Remove servers you no longer use
+# 4. Monitor logs for connection issues
+# 5. Use firewall rules to restrict network access
+#
+# For more information, see:
+# https://github.com/yourusername/rust-p2p-usb/docs/SECURITY.md

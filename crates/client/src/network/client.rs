@@ -220,11 +220,7 @@ impl IrohClient {
         drop(connections); // Release lock
 
         // Create proxy (doesn't attach yet - that's done by the caller)
-        Ok(Arc::new(DeviceProxy::new(
-            client,
-            server_id,
-            device_info,
-        )))
+        Ok(Arc::new(DeviceProxy::new(client, server_id, device_info)))
     }
 
     /// Attach to a remote device

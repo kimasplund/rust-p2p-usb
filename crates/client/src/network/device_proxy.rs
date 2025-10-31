@@ -251,17 +251,19 @@ impl DeviceProxy {
                 Ok(response) => {
                     // Check if response indicates a retryable error
                     if let TransferResult::Error { ref error } = response.result
-                        && Self::is_retryable_error(error) && attempts < MAX_RETRIES {
-                            warn!(
-                                "Retryable error on attempt {}/{}: {:?}",
-                                attempts, MAX_RETRIES, error
-                            );
-                            tokio::time::sleep(tokio::time::Duration::from_millis(
-                                100 * attempts as u64,
-                            ))
-                            .await;
-                            continue;
-                        }
+                        && Self::is_retryable_error(error)
+                        && attempts < MAX_RETRIES
+                    {
+                        warn!(
+                            "Retryable error on attempt {}/{}: {:?}",
+                            attempts, MAX_RETRIES, error
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_millis(
+                            100 * attempts as u64,
+                        ))
+                        .await;
+                        continue;
+                    }
 
                     return Ok(response);
                 }
@@ -313,13 +315,14 @@ impl Drop for DeviceProxy {
         // Note: We can't do async operations in Drop, so we just log
         // The client should call detach() explicitly before dropping
         if let Ok(guard) = self.handle.try_write()
-            && let Some(handle) = *guard {
-                warn!(
-                    "DeviceProxy dropped without detaching (handle: {}). \
+            && let Some(handle) = *guard
+        {
+            warn!(
+                "DeviceProxy dropped without detaching (handle: {}). \
                      Call detach() explicitly before dropping.",
-                    handle.0
-                );
-            }
+                handle.0
+            );
+        }
     }
 }
 

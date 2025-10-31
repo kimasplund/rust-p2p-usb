@@ -4,7 +4,7 @@
 //! and spawns per-client connection handlers.
 
 use anyhow::{Context, Result, anyhow};
-use common::{UsbBridge, ALPN_PROTOCOL};
+use common::{ALPN_PROTOCOL, UsbBridge};
 use iroh::{Endpoint, PublicKey as EndpointId};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -81,11 +81,7 @@ impl IrohServer {
 
     /// Get the server's listening addresses
     pub fn local_addrs(&self) -> Vec<std::net::SocketAddr> {
-        self.endpoint
-            .bound_sockets()
-            .iter()
-            .copied()
-            .collect()
+        self.endpoint.bound_sockets().iter().copied().collect()
     }
 
     /// Start accepting client connections
@@ -111,13 +107,9 @@ impl IrohServer {
             let require_approval = self.config.security.require_approval;
 
             tokio::spawn(async move {
-                if let Err(e) = Self::handle_connection(
-                    incoming,
-                    usb_bridge,
-                    allowed_clients,
-                    require_approval,
-                )
-                .await
+                if let Err(e) =
+                    Self::handle_connection(incoming, usb_bridge, allowed_clients, require_approval)
+                        .await
                 {
                     error!("Connection error: {:#}", e);
                 }
@@ -140,7 +132,9 @@ impl IrohServer {
         let connection = incoming.await.context("Failed to establish connection")?;
 
         // Get remote EndpointId
-        let remote_endpoint_id = connection.remote_id().context("Failed to get remote EndpointId")?;
+        let remote_endpoint_id = connection
+            .remote_id()
+            .context("Failed to get remote EndpointId")?;
 
         debug!("Connection attempt from: {}", remote_endpoint_id);
 

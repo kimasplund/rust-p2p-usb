@@ -183,16 +183,14 @@ async fn connect_and_run(
                     match IrohClient::create_device_proxy(client.clone(), server_id, device.clone())
                         .await
                     {
-                        Ok(device_proxy) => {
-                            match virtual_usb.attach_device(device_proxy).await {
-                                Ok(handle) => {
-                                    info!("  ✓ Attached as virtual USB device (handle: {})", handle.0);
-                                }
-                                Err(e) => {
-                                    warn!("  ✗ Failed to attach virtual device: {:#}", e);
-                                }
+                        Ok(device_proxy) => match virtual_usb.attach_device(device_proxy).await {
+                            Ok(handle) => {
+                                info!("  ✓ Attached as virtual USB device (handle: {})", handle.0);
                             }
-                        }
+                            Err(e) => {
+                                warn!("  ✗ Failed to attach virtual device: {:#}", e);
+                            }
+                        },
                         Err(e) => {
                             warn!("  ✗ Failed to create device proxy: {:#}", e);
                         }
@@ -262,13 +260,14 @@ async fn run_tui_mode(
                                     device.clone(),
                                 )
                                 .await
-                                    && let Ok(handle) = virtual_usb.attach_device(device_proxy).await
-                                    {
-                                        info!(
-                                            "  ✓ Attached device {:04x}:{:04x} as virtual USB (handle: {})",
-                                            device.vendor_id, device.product_id, handle.0
-                                        );
-                                    }
+                                    && let Ok(handle) =
+                                        virtual_usb.attach_device(device_proxy).await
+                                {
+                                    info!(
+                                        "  ✓ Attached device {:04x}:{:04x} as virtual USB (handle: {})",
+                                        device.vendor_id, device.product_id, handle.0
+                                    );
+                                }
                             }
                         }
                     }

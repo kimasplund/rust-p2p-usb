@@ -104,9 +104,7 @@ pub fn notify_status(status: &str) -> Result<()> {
 ///
 /// Returns None if watchdog is not enabled or not running under systemd.
 pub fn get_watchdog_timeout() -> Option<u64> {
-    env::var("WATCHDOG_USEC")
-        .ok()
-        .and_then(|s| s.parse().ok())
+    env::var("WATCHDOG_USEC").ok().and_then(|s| s.parse().ok())
 }
 
 /// Check if running under systemd

@@ -1,27 +1,28 @@
 //! Socket bridge between vhci_hcd and USB device proxy
 //!
-//! This module creates a TCP socket pair and bridges USB/IP protocol
+//! This module creates a Unix domain socket pair and bridges USB/IP protocol
 //! messages between the vhci_hcd kernel driver and our DeviceProxy over QUIC.
 
-use crate::network::device_proxy::DeviceProxy;
 use super::usbip_protocol::*;
+use crate::network::device_proxy::DeviceProxy;
 use anyhow::{Context, Result};
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::fd::OwnedFd;
+use std::os::unix::io::{FromRawFd, RawFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, oneshot};
+use tokio::net::UnixStream;
+use tokio::sync::Mutex;
 use tracing::{debug, error, info, trace, warn};
 
 /// Socket bridge for USB/IP protocol
 ///
-/// Bridges vhci_hcd kernel driver (via TCP socket) to DeviceProxy (via QUIC)
+/// Bridges vhci_hcd kernel driver (via Unix socket) to DeviceProxy (via QUIC)
 pub struct SocketBridge {
     /// Device proxy for communicating with remote USB device
     device_proxy: Arc<DeviceProxy>,
-    /// TCP socket connected to vhci_hcd
-    socket: Arc<Mutex<TcpStream>>,
+    /// Unix socket connected to vhci_hcd
+    socket: Arc<Mutex<UnixStream>>,
     /// Device ID for USB/IP protocol
     devid: u32,
     /// Port number on vhci_hcd
@@ -35,47 +36,58 @@ impl SocketBridge {
     ///
     /// Returns (SocketBridge, raw_fd_for_vhci)
     /// The raw FD should be passed to vhci_hcd via sysfs attach
-    pub async fn new(device_proxy: Arc<DeviceProxy>, devid: u32, port: u8) -> Result<(Self, RawFd)> {
-        // Create TCP listener on localhost with random port
-        let listener = TcpListener::bind("127.0.0.1:0")
+    pub async fn new(
+        device_proxy: Arc<DeviceProxy>,
+        devid: u32,
+        port: u8,
+    ) -> Result<(Self, RawFd)> {
+        use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
+        use std::os::fd::{AsRawFd, IntoRawFd};
+        use std::os::unix::net::UnixStream;
+
+        // Create Unix domain socket pair
+        // One socket for vhci_hcd, one for our bridge
+        let (vhci_owned_fd, bridge_owned_fd) = socketpair(
+            AddressFamily::Unix,
+            SockType::Stream,
+            None,
+            SockFlag::empty(),
+        )
+        .context("Failed to create Unix socket pair")?;
+
+        debug!("Created Unix socketpair for devid={}, port={}", devid, port);
+
+        // Get device info for handshake
+        let device_info = device_proxy.device_info();
+
+        // Perform USB/IP import handshake BEFORE passing FD to vhci_hcd
+        Self::perform_import_handshake(&bridge_owned_fd, device_info, devid, port)
             .await
-            .context("Failed to create TCP listener")?;
+            .context("Failed to perform USB/IP import handshake")?;
 
-        let local_addr = listener.local_addr().context("Failed to get local address")?;
-        debug!("TCP listener bound to {}", local_addr);
+        // Extract vhci raw FD (keep OwnedFd alive by leaking)
+        let vhci_fd = vhci_owned_fd.as_raw_fd();
 
-        // Channel to receive the accepted connection
-        let (tx, rx) = oneshot::channel();
+        // Transfer ownership of bridge FD (consumes OwnedFd)
+        let bridge_fd = bridge_owned_fd.into_raw_fd();
 
-        // Spawn task to accept one connection
-        tokio::spawn(async move {
-            match listener.accept().await {
-                Ok((stream, addr)) => {
-                    debug!("Accepted connection from {}", addr);
-                    let _ = tx.send(stream);
-                }
-                Err(e) => {
-                    error!("Failed to accept connection: {}", e);
-                }
-            }
-        });
+        // Keep vhci_owned_fd alive by leaking it (kernel will manage it)
+        std::mem::forget(vhci_owned_fd);
 
-        // Connect to the listener from this thread
-        // This creates the socket pair: one for vhci_hcd, one for our bridge
-        let std_stream = std::net::TcpStream::connect(local_addr)
-            .context("Failed to connect to listener")?;
+        // Convert the bridge FD to a std UnixStream (takes ownership of FD)
+        let std_stream = unsafe { UnixStream::from_raw_fd(bridge_fd) };
 
-        // Get raw FD for vhci_hcd (will be passed to kernel)
-        let vhci_fd = std_stream.as_raw_fd();
+        // Set non-blocking mode for tokio
+        std_stream
+            .set_nonblocking(true)
+            .context("Failed to set socket non-blocking")?;
 
-        // Keep the vhci socket alive by leaking it (kernel will manage it)
-        std::mem::forget(std_stream);
-
-        // Wait for the accepted connection (our bridge socket)
-        let tokio_stream = rx.await.context("Failed to receive accepted connection")?;
+        // Convert to tokio UnixStream
+        let tokio_stream = tokio::net::UnixStream::from_std(std_stream)
+            .context("Failed to create tokio UnixStream")?;
 
         debug!(
-            "Created TCP socket bridge: devid={}, port={}, fd={}",
+            "Created Unix socket bridge: devid={}, port={}, vhci_fd={}",
             devid, port, vhci_fd
         );
 
@@ -89,6 +101,60 @@ impl SocketBridge {
             },
             vhci_fd,
         ))
+    }
+
+    /// Perform USB/IP import handshake over socket
+    ///
+    /// This simulates the OP_REQ_IMPORT / OP_REP_IMPORT exchange that
+    /// normally happens between usbip client and server. Since we control
+    /// both ends of the socket, we perform the handshake synchronously.
+    async fn perform_import_handshake(
+        socket_fd: &OwnedFd,
+        device_info: &protocol::DeviceInfo,
+        devid: u32,
+        port: u8,
+    ) -> Result<()> {
+        use nix::unistd::write;
+
+        debug!(
+            "Performing USB/IP import handshake for device {} on port {}",
+            devid, port
+        );
+
+        // Create bus ID (format: "port-devid")
+        let busid = format!("{}-{}", port, devid);
+
+        // Send OP_REQ_IMPORT (client → server)
+        let req_import = UsbIpReqImport::new(&busid);
+        let mut req_buf = Vec::new();
+        req_import
+            .write_to(&mut req_buf)
+            .context("Failed to serialize OP_REQ_IMPORT")?;
+
+        // Write to socket (this is normally done over TCP)
+        let written =
+            write(socket_fd, &req_buf).context("Failed to write OP_REQ_IMPORT to socket")?;
+
+        debug!("Sent OP_REQ_IMPORT: {} bytes", written);
+
+        // Send OP_REP_IMPORT (server → client)
+        let rep_import = UsbIpRepImport::from_device_info(device_info, &busid);
+        let mut rep_buf = Vec::new();
+        rep_import
+            .write_to(&mut rep_buf)
+            .context("Failed to serialize OP_REP_IMPORT")?;
+
+        let written =
+            write(socket_fd, &rep_buf).context("Failed to write OP_REP_IMPORT to socket")?;
+
+        debug!("Sent OP_REP_IMPORT: {} bytes", written);
+
+        info!(
+            "USB/IP import handshake complete for device {} ({})",
+            devid, busid
+        );
+
+        Ok(())
     }
 
     /// Start the bridge task
@@ -206,8 +272,7 @@ impl SocketBridge {
 
         trace!(
             "Submitting USB request: seqnum={}, id={}",
-            header.seqnum,
-            usb_request.id.0
+            header.seqnum, usb_request.id.0
         );
 
         // Submit to device proxy (over QUIC to server)
@@ -222,9 +287,7 @@ impl SocketBridge {
 
         trace!(
             "Completed USB request: seqnum={}, status={}, len={}",
-            header.seqnum,
-            ret.status,
-            ret.actual_length
+            header.seqnum, ret.status, ret.actual_length
         );
 
         // Send RET_SUBMIT back to vhci_hcd
@@ -235,12 +298,7 @@ impl SocketBridge {
     }
 
     /// Send RET_SUBMIT back to vhci_hcd
-    async fn send_ret_submit(
-        &self,
-        seqnum: u32,
-        ret: UsbIpRetSubmit,
-        data: Vec<u8>,
-    ) -> Result<()> {
+    async fn send_ret_submit(&self, seqnum: u32, ret: UsbIpRetSubmit, data: Vec<u8>) -> Result<()> {
         let mut socket = self.socket.lock().await;
 
         // Write header

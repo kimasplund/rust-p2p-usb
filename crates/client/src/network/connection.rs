@@ -8,7 +8,7 @@ use common::ALPN_PROTOCOL;
 use iroh::{Endpoint, EndpointAddr, PublicKey as EndpointId};
 use protocol::{
     CURRENT_VERSION, DeviceHandle, DeviceId, DeviceInfo, Message, MessagePayload, RequestId,
-    UsbRequest, UsbResponse, validate_version, encode_framed, decode_framed,
+    UsbRequest, UsbResponse, decode_framed, encode_framed, validate_version,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -240,8 +240,7 @@ impl ServerConnection {
             .context("Failed to read response")?;
 
         // Decode response
-        let response =
-            decode_framed(&response_bytes).context("Failed to decode response")?;
+        let response = decode_framed(&response_bytes).context("Failed to decode response")?;
 
         // Validate version
         validate_version(&response.version).context("Incompatible protocol version")?;

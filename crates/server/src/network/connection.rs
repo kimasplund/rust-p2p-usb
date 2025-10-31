@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use common::UsbBridge;
 use common::{UsbCommand, UsbEvent};
-use iroh::{PublicKey as EndpointId};
+use iroh::PublicKey as EndpointId;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use protocol::{
     CURRENT_VERSION, DeviceHandle, DeviceId, Message, MessagePayload, UsbRequest, decode_framed,
@@ -242,7 +242,10 @@ impl ClientConnection {
 
     /// Handle DetachDeviceRequest
     async fn handle_detach_device(&mut self, handle: DeviceHandle) -> Result<MessagePayload> {
-        info!("Detach device request: {:?} from {}", handle, self.endpoint_id);
+        info!(
+            "Detach device request: {:?} from {}",
+            handle, self.endpoint_id
+        );
 
         // Send command to USB subsystem
         let (tx, rx) = tokio::sync::oneshot::channel();

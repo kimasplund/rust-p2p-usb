@@ -75,8 +75,8 @@ impl LinuxVirtualUsbManager {
             attached_devices: Arc::new(RwLock::new(HashMap::new())),
             socket_bridges: Arc::new(RwLock::new(HashMap::new())),
             vhci_path,
-            next_hs_port: Arc::new(RwLock::new(0)),  // High-speed ports: 0-7
-            next_ss_port: Arc::new(RwLock::new(8)),  // Super-speed ports: 8-15
+            next_hs_port: Arc::new(RwLock::new(0)), // High-speed ports: 0-7
+            next_ss_port: Arc::new(RwLock::new(8)), // Super-speed ports: 8-15
         })
     }
 
@@ -276,7 +276,13 @@ impl LinuxVirtualUsbManager {
     }
 
     /// Attach a device to the VHCI controller via sysfs
-    async fn attach_to_vhci(&self, port: u8, speed: u8, devid: u32, sockfd: std::os::unix::io::RawFd) -> Result<()> {
+    async fn attach_to_vhci(
+        &self,
+        port: u8,
+        speed: u8,
+        devid: u32,
+        sockfd: std::os::unix::io::RawFd,
+    ) -> Result<()> {
         let attach_path = self.vhci_path.join("attach");
 
         // Format: <port> <sockfd> <devid> <speed>
@@ -376,8 +382,8 @@ mod tests {
         assert_eq!(map_device_speed(DeviceSpeed::Low), 1);
         assert_eq!(map_device_speed(DeviceSpeed::Full), 2);
         assert_eq!(map_device_speed(DeviceSpeed::High), 3);
-        assert_eq!(map_device_speed(DeviceSpeed::Super), 5);     // USB_SPEED_SUPER
-        assert_eq!(map_device_speed(DeviceSpeed::SuperPlus), 6);  // USB_SPEED_SUPER_PLUS
+        assert_eq!(map_device_speed(DeviceSpeed::Super), 5); // USB_SPEED_SUPER
+        assert_eq!(map_device_speed(DeviceSpeed::SuperPlus), 6); // USB_SPEED_SUPER_PLUS
     }
 
     #[test]

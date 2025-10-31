@@ -19,6 +19,10 @@ use std::io::{Read, Write};
 /// USB/IP protocol version
 pub const USBIP_VERSION: u16 = 0x0111; // Version 1.1.1
 
+/// USB/IP import/export commands
+pub const OP_REQ_IMPORT: u16 = 0x8003;
+pub const OP_REP_IMPORT: u16 = 0x0003;
+
 /// USB/IP command codes
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -301,9 +305,7 @@ pub async fn usbip_to_usb_request(
 }
 
 /// Convert our protocol UsbResponse to USB/IP RET_SUBMIT
-pub fn usb_response_to_usbip(
-    response: &UsbResponse,
-) -> (UsbIpRetSubmit, Vec<u8>) {
+pub fn usb_response_to_usbip(response: &UsbResponse) -> (UsbIpRetSubmit, Vec<u8>) {
     match &response.result {
         protocol::TransferResult::Success { data } => {
             let ret = UsbIpRetSubmit::success(data.len() as u32);
@@ -312,16 +314,16 @@ pub fn usb_response_to_usbip(
         protocol::TransferResult::Error { error } => {
             // Map protocol errors to Linux errno values
             let errno = match error {
-                protocol::UsbError::Timeout => -110,      // ETIMEDOUT
-                protocol::UsbError::Pipe => -32,          // EPIPE
-                protocol::UsbError::NoDevice => -19,      // ENODEV
-                protocol::UsbError::InvalidParam => -22,  // EINVAL
-                protocol::UsbError::Busy => -16,          // EBUSY
-                protocol::UsbError::Overflow => -75,      // EOVERFLOW
-                protocol::UsbError::Io => -5,             // EIO
-                protocol::UsbError::Access => -13,        // EACCES
-                protocol::UsbError::NotFound => -2,       // ENOENT
-                protocol::UsbError::Other { .. } => -5,   // EIO
+                protocol::UsbError::Timeout => -110,     // ETIMEDOUT
+                protocol::UsbError::Pipe => -32,         // EPIPE
+                protocol::UsbError::NoDevice => -19,     // ENODEV
+                protocol::UsbError::InvalidParam => -22, // EINVAL
+                protocol::UsbError::Busy => -16,         // EBUSY
+                protocol::UsbError::Overflow => -75,     // EOVERFLOW
+                protocol::UsbError::Io => -5,            // EIO
+                protocol::UsbError::Access => -13,       // EACCES
+                protocol::UsbError::NotFound => -2,      // ENOENT
+                protocol::UsbError::Other { .. } => -5,  // EIO
             };
             let ret = UsbIpRetSubmit::error(errno);
             (ret, Vec::new())
@@ -392,5 +394,144 @@ mod tests {
 
         assert_eq!(ret.status, -110);
         assert_eq!(ret.actual_length, 0);
+    }
+}
+
+/// OP_REQ_IMPORT message (40 bytes)
+///
+/// Sent by client to request importing a USB device
+#[derive(Debug, Clone)]
+pub struct UsbIpReqImport {
+    /// USB/IP version (0x0111)
+    pub version: u16,
+    /// Command code (OP_REQ_IMPORT = 0x8003)
+    pub command: u16,
+    /// Status (0 for request)
+    pub status: u32,
+    /// Bus ID string (32 bytes, null-terminated)
+    pub busid: [u8; 32],
+}
+
+impl UsbIpReqImport {
+    pub fn new(busid: &str) -> Self {
+        let mut busid_bytes = [0u8; 32];
+        let bytes = busid.as_bytes();
+        let len = bytes.len().min(31); // Leave room for null terminator
+        busid_bytes[..len].copy_from_slice(&bytes[..len]);
+
+        Self {
+            version: USBIP_VERSION,
+            command: OP_REQ_IMPORT,
+            status: 0,
+            busid: busid_bytes,
+        }
+    }
+
+    pub fn write_to<W: Write>(&self, writer: &mut W) -> Result<()> {
+        writer.write_u16::<BigEndian>(self.version)?;
+        writer.write_u16::<BigEndian>(self.command)?;
+        writer.write_u32::<BigEndian>(self.status)?;
+        writer.write_all(&self.busid)?;
+        Ok(())
+    }
+}
+
+/// OP_REP_IMPORT message (header + device info)
+///
+/// Sent by server in response to OP_REQ_IMPORT
+#[derive(Debug, Clone)]
+pub struct UsbIpRepImport {
+    /// Version
+    pub version: u16,
+    /// Command (OP_REP_IMPORT = 0x0003)
+    pub command: u16,
+    /// Status (0 = success)
+    pub status: u32,
+    /// Device path (256 bytes)
+    pub udev_path: [u8; 256],
+    /// Bus ID (32 bytes)
+    pub busid: [u8; 32],
+    /// Bus number
+    pub busnum: u32,
+    /// Device number
+    pub devnum: u32,
+    /// Device speed (1-6)
+    pub speed: u32,
+    /// Vendor ID
+    pub id_vendor: u16,
+    /// Product ID
+    pub id_product: u16,
+    /// Device release
+    pub bcd_device: u16,
+    /// Device class
+    pub b_device_class: u8,
+    /// Device subclass
+    pub b_device_subclass: u8,
+    /// Device protocol
+    pub b_device_protocol: u8,
+    /// Number of configurations
+    pub b_num_configurations: u8,
+    /// Number of interfaces
+    pub b_num_interfaces: u8,
+}
+
+impl UsbIpRepImport {
+    pub fn from_device_info(info: &protocol::DeviceInfo, busid: &str) -> Self {
+        let mut busid_bytes = [0u8; 32];
+        let bytes = busid.as_bytes();
+        let len = bytes.len().min(31);
+        busid_bytes[..len].copy_from_slice(&bytes[..len]);
+
+        Self {
+            version: USBIP_VERSION,
+            command: OP_REP_IMPORT,
+            status: 0,
+            udev_path: [0u8; 256], // Not used in our case
+            busid: busid_bytes,
+            busnum: info.bus_number as u32,
+            devnum: info.device_address as u32,
+            speed: map_device_speed_to_u32(info.speed),
+            id_vendor: info.vendor_id,
+            id_product: info.product_id,
+            bcd_device: 0x0200, // USB 2.0 device
+            b_device_class: info.class,
+            b_device_subclass: info.subclass,
+            b_device_protocol: info.protocol,
+            b_num_configurations: info.num_configurations,
+            b_num_interfaces: 1, // Simplified
+        }
+    }
+
+    pub fn write_to<W: Write>(&self, writer: &mut W) -> Result<()> {
+        writer.write_u16::<BigEndian>(self.version)?;
+        writer.write_u16::<BigEndian>(self.command)?;
+        writer.write_u32::<BigEndian>(self.status)?;
+        writer.write_all(&self.udev_path)?;
+        writer.write_all(&self.busid)?;
+        writer.write_u32::<BigEndian>(self.busnum)?;
+        writer.write_u32::<BigEndian>(self.devnum)?;
+        writer.write_u32::<BigEndian>(self.speed)?;
+        writer.write_u16::<BigEndian>(self.id_vendor)?;
+        writer.write_u16::<BigEndian>(self.id_product)?;
+        writer.write_u16::<BigEndian>(self.bcd_device)?;
+        writer.write_u8(self.b_device_class)?;
+        writer.write_u8(self.b_device_subclass)?;
+        writer.write_u8(self.b_device_protocol)?;
+        writer.write_u8(self.b_num_configurations)?;
+        writer.write_u8(self.b_num_interfaces)?;
+        // Padding to align
+        writer.write_all(&[0u8; 3])?;
+        Ok(())
+    }
+}
+
+/// Map DeviceSpeed enum to USB/IP protocol speed value
+fn map_device_speed_to_u32(speed: protocol::DeviceSpeed) -> u32 {
+    match speed {
+        protocol::DeviceSpeed::Low => 1,
+        protocol::DeviceSpeed::Full => 2,
+        protocol::DeviceSpeed::High => 3,
+        protocol::DeviceSpeed::Super => 5,
+        protocol::DeviceSpeed::SuperPlus => 6,
     }
 }

@@ -82,12 +82,13 @@ impl UsbDevice {
     /// Open the device for transfers
     ///
     /// This must be called before submitting any transfers.
+    /// This will automatically detach kernel drivers and claim interface 0.
     pub fn open(&mut self) -> Result<(), AttachError> {
         if self.handle.is_some() {
             return Ok(()); // Already open
         }
 
-        let handle = self.device.open().map_err(|e| {
+        let mut handle = self.device.open().map_err(|e| {
             warn!("Failed to open device: {}", e);
             match e {
                 rusb::Error::NotFound => AttachError::DeviceNotFound,
@@ -99,15 +100,56 @@ impl UsbDevice {
         })?;
 
         debug!("Opened device {:?}", self.id);
+
+        // Detach kernel driver from interface 0 if active
+        // This is necessary because Linux kernel drivers (like usb-storage)
+        // will have claimed the interface, preventing us from accessing it
+        match handle.kernel_driver_active(0) {
+            Ok(true) => {
+                debug!("Detaching kernel driver from interface 0 on device {:?}", self.id);
+                if let Err(e) = handle.detach_kernel_driver(0) {
+                    warn!("Failed to detach kernel driver: {}", e);
+                    return Err(AttachError::Other {
+                        message: format!("Failed to detach kernel driver: {}", e),
+                    });
+                }
+            }
+            Ok(false) => {
+                debug!("No kernel driver active on interface 0");
+            }
+            Err(e) => {
+                // Some platforms don't support this operation, so just log and continue
+                debug!("Could not check kernel driver status: {}", e);
+            }
+        }
+
+        // Claim interface 0 for our exclusive use
+        if let Err(e) = handle.claim_interface(0) {
+            warn!("Failed to claim interface 0: {}", e);
+            return Err(AttachError::Other {
+                message: format!("Failed to claim interface 0: {}", e),
+            });
+        }
+        debug!("Claimed interface 0 on device {:?}", self.id);
+
         self.handle = Some(handle);
         Ok(())
     }
 
     /// Close the device
     pub fn close(&mut self) {
-        if self.handle.is_some() {
-            debug!("Closing device {:?}", self.id);
-            self.handle = None;
+        if let Some(mut handle) = self.handle.take() {
+            // Release interface 0 before closing
+            if let Err(e) = handle.release_interface(0) {
+                warn!("Failed to release interface 0: {}", e);
+            }
+
+            // Optionally reattach kernel driver
+            // Note: We don't do this automatically because the device may still be
+            // in use by the client. The kernel will reattach drivers when the device
+            // is disconnected or the system is rebooted.
+
+            debug!("Closed device {:?}", self.id);
         }
     }
 

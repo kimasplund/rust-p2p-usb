@@ -179,6 +179,12 @@ async fn connect_and_run(
                         device.product.as_deref().unwrap_or("Unknown Product")
                     );
 
+                    // TEMPORARY: Only attach Kingston DataTraveler (0951:1666) for testing
+                    if device.vendor_id != 0x0951 || device.product_id != 0x1666 {
+                        info!("  → Skipping (focusing on Kingston 8GB stick only)");
+                        continue;
+                    }
+
                     // Create device proxy and attach as virtual USB device
                     match IrohClient::create_device_proxy(client.clone(), server_id, device.clone())
                         .await

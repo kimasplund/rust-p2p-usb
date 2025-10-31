@@ -54,8 +54,8 @@ impl UsbIpCommand {
 /// This header precedes all USB/IP messages
 #[derive(Debug, Clone)]
 pub struct UsbIpHeader {
-    /// Command code
-    pub command: u16,
+    /// Command code (u32 in kernel, but we only use lower 16 bits)
+    pub command: u32,
     /// Sequence number for matching requests/responses
     pub seqnum: u32,
     /// Device ID
@@ -73,7 +73,7 @@ impl UsbIpHeader {
     /// Create a new header
     pub fn new(command: UsbIpCommand, seqnum: u32, devid: u32) -> Self {
         Self {
-            command: command as u16,
+            command: command as u32,
             seqnum,
             devid,
             direction: 0,
@@ -83,14 +83,15 @@ impl UsbIpHeader {
 
     /// Read header from a reader
     pub fn read_from<R: Read>(reader: &mut R) -> Result<Self> {
-        let command = reader.read_u16::<BigEndian>()?;
+        let command = reader.read_u32::<BigEndian>()?;
         let seqnum = reader.read_u32::<BigEndian>()?;
         let devid = reader.read_u32::<BigEndian>()?;
         let direction = reader.read_u32::<BigEndian>()?;
         let ep = reader.read_u32::<BigEndian>()?;
 
-        // Read and skip padding (32 bytes) to make header exactly 48 bytes
-        let mut padding = [0u8; 32];
+        // Read and skip padding (28 bytes) to make header exactly 48 bytes
+        // Header fields: 4+4+4+4+4 = 20 bytes, so padding = 48-20 = 28 bytes
+        let mut padding = [0u8; 28];
         reader.read_exact(&mut padding)?;
 
         Ok(Self {
@@ -104,21 +105,21 @@ impl UsbIpHeader {
 
     /// Write header to a writer
     pub fn write_to<W: Write>(&self, writer: &mut W) -> Result<()> {
-        writer.write_u16::<BigEndian>(self.command)?;
+        writer.write_u32::<BigEndian>(self.command)?;
         writer.write_u32::<BigEndian>(self.seqnum)?;
         writer.write_u32::<BigEndian>(self.devid)?;
         writer.write_u32::<BigEndian>(self.direction)?;
         writer.write_u32::<BigEndian>(self.ep)?;
 
-        // Write padding (32 bytes) to make header exactly 48 bytes
-        writer.write_all(&[0u8; 32])?;
+        // Write padding (28 bytes) to make header exactly 48 bytes
+        writer.write_all(&[0u8; 28])?;
 
         Ok(())
     }
 
     /// Get command type
     pub fn command_type(&self) -> Result<UsbIpCommand> {
-        UsbIpCommand::from_u16(self.command)
+        UsbIpCommand::from_u16(self.command as u16)
     }
 }
 

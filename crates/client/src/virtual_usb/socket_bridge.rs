@@ -1,37 +1,38 @@
 //! Socket bridge between vhci_hcd and USB device proxy
 //!
-//! This module creates a TCP localhost socket bridge and handles USB/IP protocol
+//! This module creates a Unix socketpair bridge and handles USB/IP protocol
 //! messages between the vhci_hcd kernel driver and our DeviceProxy over QUIC.
 //!
 //! # Architecture
 //!
-//! vhci_hcd expects a TCP socket with a completed USB/IP import handshake:
-//! 1. TCP server listens on localhost random port
-//! 2. Client connects to establish connection (this FD goes to vhci)
-//! 3. USB/IP handshake (OP_REQ_IMPORT / OP_REP_IMPORT) completed over connection
-//! 4. Client FD passed to vhci_hcd via sysfs attach
-//! 5. Server side becomes the bridge, forwarding CMD_SUBMIT/RET_SUBMIT
+//! vhci_hcd expects a socket FD with a completed USB/IP import handshake:
+//! 1. Create Unix socketpair (we control both ends)
+//! 2. Perform USB/IP handshake (OP_REQ_IMPORT / OP_REP_IMPORT) over socketpair
+//! 3. Pass vhci_fd to vhci_hcd via sysfs attach (kernel can close this)
+//! 4. Keep bridge_fd alive for ongoing CMD_SUBMIT/RET_SUBMIT communication
 
 use super::usbip_protocol::*;
 use crate::network::device_proxy::DeviceProxy;
-use anyhow::{Context, Result};
-use std::net::{Ipv4Addr, SocketAddr};
+use anyhow::{anyhow, Context, Result};
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::UnixStream as TokioUnixStream;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, trace, warn};
 
 /// Socket bridge for USB/IP protocol
 ///
-/// Bridges vhci_hcd kernel driver (via TCP localhost socket) to DeviceProxy (via QUIC)
+/// Bridges vhci_hcd kernel driver (via Unix socketpair) to DeviceProxy (via QUIC)
 pub struct SocketBridge {
     /// Device proxy for communicating with remote USB device
     device_proxy: Arc<DeviceProxy>,
-    /// TCP socket (server side) connected to vhci_hcd
-    socket: Arc<Mutex<TcpStream>>,
+    /// Unix socket (our end of socketpair) connected to vhci_hcd
+    socket: Arc<Mutex<TokioUnixStream>>,
+    /// vhci FD stream (kept alive to prevent socketpair from closing)
+    _vhci_stream: std::os::unix::net::UnixStream,
     /// Device ID for USB/IP protocol
     devid: u32,
     /// Port number on vhci_hcd
@@ -41,184 +42,62 @@ pub struct SocketBridge {
 }
 
 impl SocketBridge {
-    /// Create a new TCP-based socket bridge
+    /// Create a new socketpair-based socket bridge
     ///
     /// Returns (SocketBridge, raw_fd_for_vhci)
     /// The raw FD should be passed to vhci_hcd via sysfs attach
+    ///
+    /// IMPORTANT: The handshake will happen AFTER attach, initiated by the kernel.
+    /// Do NOT perform the handshake before passing vhci_fd to the kernel!
     pub async fn new(
         device_proxy: Arc<DeviceProxy>,
         devid: u32,
         port: u8,
     ) -> Result<(Self, RawFd)> {
-        // 1. Start TCP server on localhost random port
-        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
-            .await
-            .context("Failed to bind TCP listener")?;
-
-        let server_addr = listener
-            .local_addr()
-            .context("Failed to get listener address")?;
+        // 1. Create Unix socketpair (we control both ends)
+        let (vhci_stream, bridge_stream) = UnixStream::pair()
+            .context("Failed to create Unix socketpair")?;
 
         debug!(
-            "TCP server listening on {} for device {} port {}",
-            server_addr, devid, port
+            "Created Unix socketpair for device {} port {}: vhci_fd={}, bridge_fd={}",
+            devid, port, vhci_stream.as_raw_fd(), bridge_stream.as_raw_fd()
         );
 
-        // 2. Connect as client (this socket will be passed to vhci)
-        let mut client_stream = TcpStream::connect(server_addr)
-            .await
-            .context("Failed to connect to TCP server")?;
+        // 2. Extract vhci FD before converting to tokio
+        // The kernel will use this FD for reading device metadata and initiating the handshake
+        let vhci_fd = vhci_stream.as_raw_fd();
 
-        // 3. Accept the connection on server side
-        let (mut server_stream, client_addr) = listener
-            .accept()
-            .await
-            .context("Failed to accept connection")?;
+        // 3. Keep vhci_stream alive (don't leak it!)
+        // The kernel will duplicate the FD when we pass it via sysfs,
+        // so we need to keep our copy alive to prevent socketpair closure
 
-        debug!("Accepted TCP connection from {}", client_addr);
+        // 4. Convert bridge_stream to tokio for async operations
+        // We need to set non-blocking mode first
+        bridge_stream.set_nonblocking(true)
+            .context("Failed to set bridge_stream to non-blocking")?;
 
-        // 4. Get device info for handshake
-        let device_info = device_proxy.device_info();
+        let bridge_stream_tokio = TokioUnixStream::from_std(bridge_stream)
+            .context("Failed to convert bridge_stream to tokio")?;
 
-        // 5. Perform USB/IP handshake over the connection
-        // Client sends OP_REQ_IMPORT, server responds OP_REP_IMPORT
-        Self::perform_tcp_handshake(
-            &mut client_stream,
-            &mut server_stream,
-            device_info,
-            devid,
-            port,
-        )
-        .await
-        .context("Failed to perform USB/IP handshake")?;
-
-        // 6. Extract client FD for vhci_hcd (leak ownership)
-        let vhci_fd = client_stream.as_raw_fd();
-
-        debug!(
-            "USB/IP handshake complete, vhci_fd={} for device {} port {}",
-            vhci_fd, devid, port
-        );
-
-        // Keep client_stream alive by leaking it (kernel will manage it after sysfs attach)
-        std::mem::forget(client_stream);
-
-        // 7. Server side becomes our bridge
+        // 5. Keep BOTH socketpair ends alive for ongoing communication
+        // vhci_stream is stored to prevent socketpair from closing when kernel closes its dup'd FD
         let bridge = Self {
             device_proxy,
-            socket: Arc::new(Mutex::new(server_stream)),
+            socket: Arc::new(Mutex::new(bridge_stream_tokio)),
+            _vhci_stream: vhci_stream,
             devid,
             port,
             running: Arc::new(AtomicBool::new(true)),
         };
 
         debug!(
-            "Created TCP socket bridge: devid={}, port={}, vhci_fd={}",
+            "Created Unix socketpair bridge: devid={}, port={}, vhci_fd={} (handshake will happen after attach)",
             devid, port, vhci_fd
         );
 
         Ok((bridge, vhci_fd))
     }
 
-    /// Perform USB/IP handshake over TCP connection
-    ///
-    /// This performs a proper OP_REQ_IMPORT / OP_REP_IMPORT exchange
-    /// over the TCP connection before passing the FD to vhci_hcd.
-    ///
-    /// Client side sends OP_REQ_IMPORT, server side responds with OP_REP_IMPORT.
-    async fn perform_tcp_handshake(
-        client: &mut TcpStream,
-        server: &mut TcpStream,
-        device_info: &protocol::DeviceInfo,
-        devid: u32,
-        port: u8,
-    ) -> Result<()> {
-        debug!(
-            "Performing USB/IP TCP handshake for device {} on port {}",
-            devid, port
-        );
-
-        // Create bus ID (format: "port-devid")
-        let busid = format!("{}-{}", port, devid);
-
-        // Serialize OP_REQ_IMPORT
-        let req = UsbIpReqImport::new(&busid);
-        let mut req_buf = Vec::new();
-        req.write_to(&mut req_buf)
-            .context("Failed to serialize OP_REQ_IMPORT")?;
-
-        // Serialize OP_REP_IMPORT
-        let rep = UsbIpRepImport::from_device_info(device_info, &busid);
-        let mut rep_buf = Vec::new();
-        rep.write_to(&mut rep_buf)
-            .context("Failed to serialize OP_REP_IMPORT")?;
-
-        debug!(
-            "Handshake message sizes: OP_REQ_IMPORT={} bytes, OP_REP_IMPORT={} bytes",
-            req_buf.len(),
-            rep_buf.len()
-        );
-
-        // Split the TCP streams for independent read/write operations
-        // We need to use split() to get separate read and write halves
-        let (mut client_read, mut client_write) = client.split();
-        let (mut server_read, mut server_write) = server.split();
-
-        // Client sends OP_REQ_IMPORT
-        client_write
-            .write_all(&req_buf)
-            .await
-            .context("Failed to write OP_REQ_IMPORT")?;
-        client_write
-            .flush()
-            .await
-            .context("Failed to flush OP_REQ_IMPORT")?;
-
-        trace!("Client sent OP_REQ_IMPORT: {} bytes", req_buf.len());
-
-        // Server reads OP_REQ_IMPORT
-        let mut req_read_buf = vec![0u8; req_buf.len()];
-        server_read
-            .read_exact(&mut req_read_buf)
-            .await
-            .context("Failed to read OP_REQ_IMPORT")?;
-
-        trace!(
-            "Server received OP_REQ_IMPORT: {} bytes",
-            req_read_buf.len()
-        );
-
-        // Server sends OP_REP_IMPORT
-        server_write
-            .write_all(&rep_buf)
-            .await
-            .context("Failed to write OP_REP_IMPORT")?;
-        server_write
-            .flush()
-            .await
-            .context("Failed to flush OP_REP_IMPORT")?;
-
-        trace!("Server sent OP_REP_IMPORT: {} bytes", rep_buf.len());
-
-        // Client reads OP_REP_IMPORT
-        let mut rep_read_buf = vec![0u8; rep_buf.len()];
-        client_read
-            .read_exact(&mut rep_read_buf)
-            .await
-            .context("Failed to read OP_REP_IMPORT")?;
-
-        trace!(
-            "Client received OP_REP_IMPORT: {} bytes",
-            rep_read_buf.len()
-        );
-
-        info!(
-            "USB/IP TCP handshake complete for device {} ({})",
-            devid, busid
-        );
-
-        Ok(())
-    }
 
     /// Start the bridge task
     ///
@@ -244,6 +123,15 @@ impl SocketBridge {
             self.devid, self.port
         );
 
+        // The kernel expects the socket to be ready for CMD_SUBMIT/RET_SUBMIT immediately
+        // There is no handshake - the handshake happens externally before the FD is passed to vhci_hcd
+
+        info!(
+            "Socket bridge ready for device {} on port {}, entering main loop",
+            self.devid, self.port
+        );
+
+        // Enter the main loop for CMD_SUBMIT/RET_SUBMIT
         while self.running.load(Ordering::Acquire) {
             // Read USB/IP message from vhci_hcd
             let (header, cmd, data) = match self.read_usbip_message().await {
@@ -291,35 +179,78 @@ impl SocketBridge {
 
         // Read header (48 bytes)
         let mut header_buf = vec![0u8; UsbIpHeader::SIZE];
-        socket
-            .read_exact(&mut header_buf)
-            .await
-            .context("Failed to read USB/IP header")?;
+        if let Err(e) = socket.read_exact(&mut header_buf).await {
+            error!("Failed to read header: {:#}", e);
+            return Err(anyhow::anyhow!("Failed to read USB/IP header: {}", e));
+        }
+
+        debug!(
+            "Read header bytes: {:02x?} (first 16 bytes)",
+            &header_buf[..16.min(header_buf.len())]
+        );
 
         let mut cursor = std::io::Cursor::new(&header_buf);
         let header = UsbIpHeader::read_from(&mut cursor)?;
 
-        // Read CMD_SUBMIT payload (40 bytes)
-        let mut cmd_buf = vec![0u8; UsbIpCmdSubmit::SIZE];
-        socket
-            .read_exact(&mut cmd_buf)
-            .await
-            .context("Failed to read CMD_SUBMIT")?;
+        debug!(
+            "Parsed header: command={:#06x}, seqnum={}, devid={}, direction={}, ep={}",
+            header.command, header.seqnum, header.devid, header.direction, header.ep
+        );
 
-        let mut cursor = std::io::Cursor::new(&cmd_buf);
-        let cmd = UsbIpCmdSubmit::read_from(&mut cursor)?;
+        // Check command type and read appropriate payload
+        let cmd_type = header.command_type()?;
 
-        // Read data if OUT transfer (direction = 0)
-        let mut data = Vec::new();
-        if header.direction == 0 && cmd.transfer_buffer_length > 0 {
-            data.resize(cmd.transfer_buffer_length as usize, 0);
-            socket
-                .read_exact(&mut data)
-                .await
-                .context("Failed to read transfer data")?;
+        match cmd_type {
+            UsbIpCommand::CmdSubmit => {
+                // Read CMD_SUBMIT payload (40 bytes)
+                let mut cmd_buf = vec![0u8; UsbIpCmdSubmit::SIZE];
+                socket
+                    .read_exact(&mut cmd_buf)
+                    .await
+                    .context("Failed to read CMD_SUBMIT payload")?;
+
+                let mut cursor = std::io::Cursor::new(&cmd_buf);
+                let cmd = UsbIpCmdSubmit::read_from(&mut cursor)?;
+
+                // Read data if OUT transfer (direction = 0)
+                let mut data = Vec::new();
+                if header.direction == 0 && cmd.transfer_buffer_length > 0 {
+                    data.resize(cmd.transfer_buffer_length as usize, 0);
+                    socket
+                        .read_exact(&mut data)
+                        .await
+                        .context("Failed to read transfer data")?;
+                }
+
+                Ok((header, cmd, data))
+            }
+            UsbIpCommand::CmdUnlink => {
+                // CMD_UNLINK has only a 4-byte payload: seqnum_unlink (u32)
+                // This is the sequence number of the request to unlink
+                let mut unlink_buf = vec![0u8; 4];
+                socket
+                    .read_exact(&mut unlink_buf)
+                    .await
+                    .context("Failed to read CMD_UNLINK payload")?;
+
+                // Return empty CMD_SUBMIT (will be ignored by caller)
+                let empty_cmd = UsbIpCmdSubmit {
+                    transfer_flags: 0,
+                    transfer_buffer_length: 0,
+                    start_frame: 0,
+                    number_of_packets: 0,
+                    interval: 0,
+                    setup: [0; 8],
+                };
+                Ok((header, empty_cmd, Vec::new()))
+            }
+            _ => {
+                Err(anyhow!(
+                    "Unexpected command type in read_usbip_message: {:?}",
+                    cmd_type
+                ))
+            }
         }
-
-        Ok((header, cmd, data))
     }
 
     /// Handle CMD_SUBMIT by forwarding to DeviceProxy
@@ -354,29 +285,45 @@ impl SocketBridge {
         );
 
         // Send RET_SUBMIT back to vhci_hcd
-        self.send_ret_submit(header.seqnum, ret, response_data)
+        self.send_ret_submit(&header, ret, response_data)
             .await?;
 
         Ok(())
     }
 
     /// Send RET_SUBMIT back to vhci_hcd
-    async fn send_ret_submit(&self, seqnum: u32, ret: UsbIpRetSubmit, data: Vec<u8>) -> Result<()> {
+    async fn send_ret_submit(&self, request_header: &UsbIpHeader, ret: UsbIpRetSubmit, data: Vec<u8>) -> Result<()> {
         let mut socket = self.socket.lock().await;
 
-        // Write header
-        let header = UsbIpHeader::new(UsbIpCommand::RetSubmit, seqnum, self.devid);
+        // Write header - preserve direction and ep from request
+        let mut header = UsbIpHeader::new(UsbIpCommand::RetSubmit, request_header.seqnum, request_header.devid);
+        header.direction = request_header.direction;
+        header.ep = request_header.ep;
         let mut header_buf = Vec::new();
         header.write_to(&mut header_buf)?;
+
+        debug!(
+            "Writing RET_SUBMIT header: command={:#06x}, seqnum={}, devid={}, direction={}, ep={}, header_bytes={:02x?}",
+            header.command, header.seqnum, header.devid, header.direction, header.ep,
+            &header_buf[..16.min(header_buf.len())]
+        );
+
         socket.write_all(&header_buf).await?;
 
         // Write RET_SUBMIT payload
         let mut ret_buf = Vec::new();
         ret.write_to(&mut ret_buf)?;
+
+        debug!(
+            "Writing RET_SUBMIT payload: status={}, actual_length={}, ret_bytes={:02x?}",
+            ret.status, ret.actual_length, &ret_buf[..20.min(ret_buf.len())]
+        );
+
         socket.write_all(&ret_buf).await?;
 
         // Write response data if any
         if !data.is_empty() {
+            debug!("Writing RET_SUBMIT data: {} bytes", data.len());
             socket.write_all(&data).await?;
         }
 

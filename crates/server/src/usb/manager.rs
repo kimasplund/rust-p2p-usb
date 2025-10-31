@@ -191,6 +191,8 @@ impl DeviceManager {
         self.devices
             .values()
             .map(|device| device.device_info())
+            // TEMPORARY: Only expose ADATA USB Flash Drive (125f:317a) for focused testing
+            .filter(|info| info.vendor_id == 0x125f && info.product_id == 0x317a)
             .collect()
     }
 

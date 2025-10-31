@@ -8,7 +8,7 @@ use common::ALPN_PROTOCOL;
 use iroh::{Endpoint, EndpointAddr, PublicKey as EndpointId};
 use protocol::{
     CURRENT_VERSION, DeviceHandle, DeviceId, DeviceInfo, Message, MessagePayload, RequestId,
-    UsbRequest, UsbResponse, validate_version,
+    UsbRequest, UsbResponse, validate_version, encode_framed, decode_framed,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -227,22 +227,21 @@ impl ServerConnection {
         let (mut send, mut recv) = conn.open_bi().await.context("Failed to open QUIC stream")?;
 
         // Encode and send message
-        let encoded = protocol::encode_message(&message).context("Failed to encode message")?;
+        let encoded = encode_framed(&message).context("Failed to encode message")?;
 
-        send.write_all(&encoded)
+        protocol::write_framed_async(&mut send, &encoded)
             .await
             .context("Failed to write message")?;
         send.finish().context("Failed to finish stream")?;
 
         // Read response
-        let response_bytes = recv
-            .read_to_end(protocol::MAX_FRAME_SIZE)
+        let response_bytes = protocol::read_framed_async(&mut recv)
             .await
             .context("Failed to read response")?;
 
         // Decode response
         let response =
-            protocol::decode_message(&response_bytes).context("Failed to decode response")?;
+            decode_framed(&response_bytes).context("Failed to decode response")?;
 
         // Validate version
         validate_version(&response.version).context("Incompatible protocol version")?;

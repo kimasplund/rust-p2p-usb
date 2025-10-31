@@ -18,8 +18,10 @@ repository = "https://github.com/yourusername/rust-p2p-usb"
 [workspace.dependencies]
 # Protocol and serialization
 serde = { version = "1.0", features = ["derive"] }
+serde_bytes = "0.11"
 postcard = { version = "1.0", features = ["alloc"] }
 bytes = "1.8"
+byteorder = "1.5"
 
 # Error handling
 thiserror = "2.0"

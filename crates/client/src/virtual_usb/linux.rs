@@ -42,12 +42,15 @@ use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 use super::device::VirtualDevice;
+use super::socket_bridge::SocketBridge;
 use crate::network::device_proxy::DeviceProxy;
 
 /// Linux-specific virtual USB manager using USB/IP
 pub struct LinuxVirtualUsbManager {
     /// Attached virtual devices
     attached_devices: Arc<RwLock<HashMap<DeviceHandle, VirtualDevice>>>,
+    /// Socket bridges for USB/IP protocol
+    socket_bridges: Arc<RwLock<HashMap<DeviceHandle, Arc<SocketBridge>>>>,
     /// VHCI device path (e.g., /sys/devices/platform/vhci_hcd.0)
     vhci_path: PathBuf,
     /// Next port to allocate (0-7)
@@ -68,6 +71,7 @@ impl LinuxVirtualUsbManager {
 
         Ok(Self {
             attached_devices: Arc::new(RwLock::new(HashMap::new())),
+            socket_bridges: Arc::new(RwLock::new(HashMap::new())),
             vhci_path,
             next_port: Arc::new(RwLock::new(0)),
         })
@@ -123,20 +127,34 @@ impl LinuxVirtualUsbManager {
         // Generate unique device ID (using device handle as ID)
         let devid = handle.0;
 
+        // Create socket bridge for USB/IP protocol
+        let (socket_bridge, vhci_fd) = SocketBridge::new(device_proxy.clone(), devid, port)
+            .context("Failed to create socket bridge")?;
+
+        let socket_bridge = Arc::new(socket_bridge);
+
+        // Attach to VHCI via sysfs (pass real socket FD)
+        self.attach_to_vhci(port, speed, devid, vhci_fd)
+            .await
+            .context("Failed to attach device to vhci_hcd")?;
+
+        // Start the socket bridge
+        socket_bridge.clone().start();
+
         // Create virtual device
         let virtual_device =
             VirtualDevice::new(handle, device_proxy.clone(), device_info.clone(), port);
 
-        // Attach to VHCI via sysfs
-        self.attach_to_vhci(port, speed, devid)
-            .await
-            .context("Failed to attach device to vhci_hcd")?;
-
-        // Store device
+        // Store device and bridge
         self.attached_devices
             .write()
             .await
             .insert(handle, virtual_device);
+
+        self.socket_bridges
+            .write()
+            .await
+            .insert(handle, socket_bridge);
 
         info!(
             "Virtual device attached successfully: handle={}, port={}",
@@ -161,6 +179,13 @@ impl LinuxVirtualUsbManager {
             "Detaching virtual device: handle={}, port={}",
             handle.0, port
         );
+
+        // Stop the socket bridge first
+        let mut bridges = self.socket_bridges.write().await;
+        if let Some(bridge) = bridges.remove(&handle) {
+            bridge.stop();
+        }
+        drop(bridges);
 
         // Detach from VHCI
         self.detach_from_vhci(port)
@@ -218,12 +243,12 @@ impl LinuxVirtualUsbManager {
     }
 
     /// Attach a device to the VHCI controller via sysfs
-    async fn attach_to_vhci(&self, port: u8, speed: u8, devid: u32) -> Result<()> {
+    async fn attach_to_vhci(&self, port: u8, speed: u8, devid: u32, sockfd: std::os::unix::io::RawFd) -> Result<()> {
         let attach_path = self.vhci_path.join("attach");
 
         // Format: <port> <speed> <devid> <sockfd>
-        // sockfd = -1 for userspace implementation
-        let attach_string = format!("{} {} {} -1\n", port, speed, devid);
+        // sockfd = real socket FD from socket bridge
+        let attach_string = format!("{} {} {} {}\n", port, speed, devid, sockfd);
 
         debug!(
             "Writing to {}: {}",

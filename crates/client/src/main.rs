@@ -262,15 +262,13 @@ async fn run_tui_mode(
                                     device.clone(),
                                 )
                                 .await
-                                {
-                                    if let Ok(handle) = virtual_usb.attach_device(device_proxy).await
+                                    && let Ok(handle) = virtual_usb.attach_device(device_proxy).await
                                     {
                                         info!(
                                             "  ✓ Attached device {:04x}:{:04x} as virtual USB (handle: {})",
                                             device.vendor_id, device.product_id, handle.0
                                         );
                                     }
-                                }
                             }
                         }
                     }

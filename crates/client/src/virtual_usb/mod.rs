@@ -26,6 +26,12 @@ use crate::network::device_proxy::DeviceProxy;
 #[cfg(target_os = "linux")]
 pub mod linux;
 
+#[cfg(target_os = "linux")]
+pub mod usbip_protocol;
+
+#[cfg(target_os = "linux")]
+pub mod socket_bridge;
+
 #[cfg(target_os = "macos")]
 pub mod macos;
 

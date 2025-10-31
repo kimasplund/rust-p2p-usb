@@ -125,6 +125,14 @@ impl DeviceProxy {
             .ok_or_else(|| anyhow!("Device not attached. Call attach() first."))
     }
 
+    /// Get device handle (public version for USB/IP bridge)
+    ///
+    /// Returns the device handle if attached, or an error if not.
+    /// Used by the USB/IP socket bridge to construct requests.
+    pub async fn handle(&self) -> Result<DeviceHandle> {
+        self.get_handle().await
+    }
+
     /// Perform a control transfer
     ///
     /// # Arguments
@@ -160,7 +168,7 @@ impl DeviceProxy {
             },
         };
 
-        self.submit_transfer_with_retry(usb_request).await
+        self.submit_transfer(usb_request).await
     }
 
     /// Perform an interrupt transfer
@@ -192,7 +200,7 @@ impl DeviceProxy {
             },
         };
 
-        self.submit_transfer_with_retry(usb_request).await
+        self.submit_transfer(usb_request).await
     }
 
     /// Perform a bulk transfer
@@ -224,11 +232,11 @@ impl DeviceProxy {
             },
         };
 
-        self.submit_transfer_with_retry(usb_request).await
+        self.submit_transfer(usb_request).await
     }
 
     /// Submit transfer with automatic retry on transient errors
-    async fn submit_transfer_with_retry(&self, request: UsbRequest) -> Result<UsbResponse> {
+    pub async fn submit_transfer(&self, request: UsbRequest) -> Result<UsbResponse> {
         const MAX_RETRIES: u32 = 3;
         let mut attempts = 0;
 
@@ -242,8 +250,8 @@ impl DeviceProxy {
             {
                 Ok(response) => {
                     // Check if response indicates a retryable error
-                    if let TransferResult::Error { ref error } = response.result {
-                        if Self::is_retryable_error(error) && attempts < MAX_RETRIES {
+                    if let TransferResult::Error { ref error } = response.result
+                        && Self::is_retryable_error(error) && attempts < MAX_RETRIES {
                             warn!(
                                 "Retryable error on attempt {}/{}: {:?}",
                                 attempts, MAX_RETRIES, error
@@ -254,7 +262,6 @@ impl DeviceProxy {
                             .await;
                             continue;
                         }
-                    }
 
                     return Ok(response);
                 }
@@ -305,13 +312,14 @@ impl Drop for DeviceProxy {
     fn drop(&mut self) {
         // Note: We can't do async operations in Drop, so we just log
         // The client should call detach() explicitly before dropping
-        if let Some(handle) = *self.handle.blocking_write() {
-            warn!(
-                "DeviceProxy dropped without detaching (handle: {}). \
-                 Call detach() explicitly before dropping.",
-                handle.0
-            );
-        }
+        if let Ok(guard) = self.handle.try_write()
+            && let Some(handle) = *guard {
+                warn!(
+                    "DeviceProxy dropped without detaching (handle: {}). \
+                     Call detach() explicitly before dropping.",
+                    handle.0
+                );
+            }
     }
 }
 

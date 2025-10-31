@@ -32,3 +32,4 @@ shellexpand.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix.workspace = true
+byteorder.workspace = true

@@ -18,12 +18,12 @@
 //!
 //! ## Attach Format
 //!
-//! Write to `attach`: `<port> <speed> <devid> <sockfd>`
+//! Write to `attach`: `<port> <sockfd> <devid> <speed>`
 //!
 //! - `port`: VHCI port number (0-7 for vhci_hcd.0)
-//! - `speed`: Device speed (1=low, 2=full, 3=high, 4=super, 5=super+)
-//! - `devid`: Unique device ID (busnum << 16 | devnum)
 //! - `sockfd`: Socket file descriptor (-1 for userspace implementation)
+//! - `devid`: Unique device ID (busnum << 16 | devnum)
+//! - `speed`: Device speed (1=low, 2=full, 3=high, 5=super, 6=super+)
 //!
 //! # Limitations
 //!
@@ -279,9 +279,9 @@ impl LinuxVirtualUsbManager {
     async fn attach_to_vhci(&self, port: u8, speed: u8, devid: u32, sockfd: std::os::unix::io::RawFd) -> Result<()> {
         let attach_path = self.vhci_path.join("attach");
 
-        // Format: <port> <speed> <devid> <sockfd>
+        // Format: <port> <sockfd> <devid> <speed>
         // sockfd = real socket FD from socket bridge
-        let attach_string = format!("{} {} {} {}\n", port, speed, devid, sockfd);
+        let attach_string = format!("{} {} {} {}\n", port, sockfd, devid, speed);
 
         debug!(
             "Writing to {}: {}",

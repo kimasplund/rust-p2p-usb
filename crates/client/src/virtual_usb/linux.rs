@@ -327,11 +327,11 @@ impl LinuxVirtualUsbManager {
 /// Map DeviceSpeed to USB/IP speed code
 fn map_device_speed(speed: DeviceSpeed) -> u8 {
     match speed {
-        DeviceSpeed::Low => 1,       // 1.5 Mbps
-        DeviceSpeed::Full => 2,      // 12 Mbps
-        DeviceSpeed::High => 3,      // 480 Mbps
-        DeviceSpeed::Super => 4,     // 5 Gbps
-        DeviceSpeed::SuperPlus => 5, // 10 Gbps
+        DeviceSpeed::Low => 1,       // USB_SPEED_LOW - 1.5 Mbps
+        DeviceSpeed::Full => 2,      // USB_SPEED_FULL - 12 Mbps
+        DeviceSpeed::High => 3,      // USB_SPEED_HIGH - 480 Mbps
+        DeviceSpeed::Super => 5,     // USB_SPEED_SUPER - 5 Gbps (NOT 4 - that's WIRELESS)
+        DeviceSpeed::SuperPlus => 6, // USB_SPEED_SUPER_PLUS - 10+ Gbps
     }
 }
 
@@ -344,8 +344,8 @@ mod tests {
         assert_eq!(map_device_speed(DeviceSpeed::Low), 1);
         assert_eq!(map_device_speed(DeviceSpeed::Full), 2);
         assert_eq!(map_device_speed(DeviceSpeed::High), 3);
-        assert_eq!(map_device_speed(DeviceSpeed::Super), 4);
-        assert_eq!(map_device_speed(DeviceSpeed::SuperPlus), 5);
+        assert_eq!(map_device_speed(DeviceSpeed::Super), 5);     // USB_SPEED_SUPER
+        assert_eq!(map_device_speed(DeviceSpeed::SuperPlus), 6);  // USB_SPEED_SUPER_PLUS
     }
 
     #[test]

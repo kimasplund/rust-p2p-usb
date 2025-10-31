@@ -124,6 +124,11 @@ impl LinuxVirtualUsbManager {
         // Map device speed to USB/IP speed code
         let speed = map_device_speed(device_info.speed);
 
+        debug!(
+            "Device speed mapping: {:?} -> {} (port={}, devid={})",
+            device_info.speed, speed, port, handle.0
+        );
+
         // Generate unique device ID (using device handle as ID)
         let devid = handle.0;
 

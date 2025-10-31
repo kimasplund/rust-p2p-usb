@@ -1,28 +1,27 @@
 //! Socket bridge between vhci_hcd and USB device proxy
 //!
-//! This module creates a Unix socket pair and bridges USB/IP protocol
+//! This module creates a TCP socket pair and bridges USB/IP protocol
 //! messages between the vhci_hcd kernel driver and our DeviceProxy over QUIC.
 
 use crate::network::device_proxy::DeviceProxy;
 use super::usbip_protocol::*;
 use anyhow::{Context, Result};
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream as TokioUnixStream;
-use tokio::sync::Mutex;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{Mutex, oneshot};
 use tracing::{debug, error, info, trace, warn};
 
 /// Socket bridge for USB/IP protocol
 ///
-/// Bridges vhci_hcd kernel driver (via Unix socket) to DeviceProxy (via QUIC)
+/// Bridges vhci_hcd kernel driver (via TCP socket) to DeviceProxy (via QUIC)
 pub struct SocketBridge {
     /// Device proxy for communicating with remote USB device
     device_proxy: Arc<DeviceProxy>,
-    /// Unix socket connected to vhci_hcd
-    socket: Arc<Mutex<TokioUnixStream>>,
+    /// TCP socket connected to vhci_hcd
+    socket: Arc<Mutex<TcpStream>>,
     /// Device ID for USB/IP protocol
     devid: u32,
     /// Port number on vhci_hcd
@@ -36,33 +35,54 @@ impl SocketBridge {
     ///
     /// Returns (SocketBridge, raw_fd_for_vhci)
     /// The raw FD should be passed to vhci_hcd via sysfs attach
-    pub fn new(device_proxy: Arc<DeviceProxy>, devid: u32, port: u8) -> Result<(Self, RawFd)> {
-        // Create Unix socket pair
-        let (sock_vhci, sock_bridge) =
-            UnixStream::pair().context("Failed to create Unix socket pair")?;
+    pub async fn new(device_proxy: Arc<DeviceProxy>, devid: u32, port: u8) -> Result<(Self, RawFd)> {
+        // Create TCP listener on localhost with random port
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .context("Failed to create TCP listener")?;
+
+        let local_addr = listener.local_addr().context("Failed to get local address")?;
+        debug!("TCP listener bound to {}", local_addr);
+
+        // Channel to receive the accepted connection
+        let (tx, rx) = oneshot::channel();
+
+        // Spawn task to accept one connection
+        tokio::spawn(async move {
+            match listener.accept().await {
+                Ok((stream, addr)) => {
+                    debug!("Accepted connection from {}", addr);
+                    let _ = tx.send(stream);
+                }
+                Err(e) => {
+                    error!("Failed to accept connection: {}", e);
+                }
+            }
+        });
+
+        // Connect to the listener from this thread
+        // This creates the socket pair: one for vhci_hcd, one for our bridge
+        let std_stream = std::net::TcpStream::connect(local_addr)
+            .context("Failed to connect to listener")?;
 
         // Get raw FD for vhci_hcd (will be passed to kernel)
-        let vhci_fd = sock_vhci.as_raw_fd();
+        let vhci_fd = std_stream.as_raw_fd();
 
-        // Keep sock_vhci alive by leaking it (kernel will close it when done)
-        std::mem::forget(sock_vhci);
+        // Keep the vhci socket alive by leaking it (kernel will manage it)
+        std::mem::forget(std_stream);
 
-        // Convert sock_bridge to async
-        sock_bridge
-            .set_nonblocking(true)
-            .context("Failed to set socket non-blocking")?;
-        let tokio_socket = TokioUnixStream::from_std(sock_bridge)
-            .context("Failed to convert socket to tokio")?;
+        // Wait for the accepted connection (our bridge socket)
+        let tokio_stream = rx.await.context("Failed to receive accepted connection")?;
 
         debug!(
-            "Created socket bridge: devid={}, port={}, fd={}",
+            "Created TCP socket bridge: devid={}, port={}, fd={}",
             devid, port, vhci_fd
         );
 
         Ok((
             Self {
                 device_proxy,
-                socket: Arc::new(Mutex::new(tokio_socket)),
+                socket: Arc::new(Mutex::new(tokio_stream)),
                 devid,
                 port,
                 running: Arc::new(AtomicBool::new(true)),

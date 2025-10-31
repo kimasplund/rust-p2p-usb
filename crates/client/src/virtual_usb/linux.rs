@@ -129,6 +129,7 @@ impl LinuxVirtualUsbManager {
 
         // Create socket bridge for USB/IP protocol
         let (socket_bridge, vhci_fd) = SocketBridge::new(device_proxy.clone(), devid, port)
+            .await
             .context("Failed to create socket bridge")?;
 
         let socket_bridge = Arc::new(socket_bridge);

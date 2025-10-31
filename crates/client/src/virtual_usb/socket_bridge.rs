@@ -1,28 +1,37 @@
 //! Socket bridge between vhci_hcd and USB device proxy
 //!
-//! This module creates a Unix domain socket pair and bridges USB/IP protocol
+//! This module creates a TCP localhost socket bridge and handles USB/IP protocol
 //! messages between the vhci_hcd kernel driver and our DeviceProxy over QUIC.
+//!
+//! # Architecture
+//!
+//! vhci_hcd expects a TCP socket with a completed USB/IP import handshake:
+//! 1. TCP server listens on localhost random port
+//! 2. Client connects to establish connection (this FD goes to vhci)
+//! 3. USB/IP handshake (OP_REQ_IMPORT / OP_REP_IMPORT) completed over connection
+//! 4. Client FD passed to vhci_hcd via sysfs attach
+//! 5. Server side becomes the bridge, forwarding CMD_SUBMIT/RET_SUBMIT
 
 use super::usbip_protocol::*;
 use crate::network::device_proxy::DeviceProxy;
 use anyhow::{Context, Result};
-use std::os::fd::OwnedFd;
-use std::os::unix::io::{FromRawFd, RawFd};
+use std::net::{Ipv4Addr, SocketAddr};
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, trace, warn};
 
 /// Socket bridge for USB/IP protocol
 ///
-/// Bridges vhci_hcd kernel driver (via Unix socket) to DeviceProxy (via QUIC)
+/// Bridges vhci_hcd kernel driver (via TCP localhost socket) to DeviceProxy (via QUIC)
 pub struct SocketBridge {
     /// Device proxy for communicating with remote USB device
     device_proxy: Arc<DeviceProxy>,
-    /// Unix socket connected to vhci_hcd
-    socket: Arc<Mutex<UnixStream>>,
+    /// TCP socket (server side) connected to vhci_hcd
+    socket: Arc<Mutex<TcpStream>>,
     /// Device ID for USB/IP protocol
     devid: u32,
     /// Port number on vhci_hcd
@@ -32,7 +41,7 @@ pub struct SocketBridge {
 }
 
 impl SocketBridge {
-    /// Create a new socket bridge
+    /// Create a new TCP-based socket bridge
     ///
     /// Returns (SocketBridge, raw_fd_for_vhci)
     /// The raw FD should be passed to vhci_hcd via sysfs attach
@@ -41,116 +50,170 @@ impl SocketBridge {
         devid: u32,
         port: u8,
     ) -> Result<(Self, RawFd)> {
-        use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
-        use std::os::fd::{AsRawFd, IntoRawFd};
-        use std::os::unix::net::UnixStream;
-
-        // Create Unix domain socket pair
-        // One socket for vhci_hcd, one for our bridge
-        let (vhci_owned_fd, bridge_owned_fd) = socketpair(
-            AddressFamily::Unix,
-            SockType::Stream,
-            None,
-            SockFlag::empty(),
-        )
-        .context("Failed to create Unix socket pair")?;
-
-        debug!("Created Unix socketpair for devid={}, port={}", devid, port);
-
-        // Get device info for handshake
-        let device_info = device_proxy.device_info();
-
-        // Perform USB/IP import handshake BEFORE passing FD to vhci_hcd
-        Self::perform_import_handshake(&bridge_owned_fd, device_info, devid, port)
+        // 1. Start TCP server on localhost random port
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .await
-            .context("Failed to perform USB/IP import handshake")?;
+            .context("Failed to bind TCP listener")?;
 
-        // Extract vhci raw FD (keep OwnedFd alive by leaking)
-        let vhci_fd = vhci_owned_fd.as_raw_fd();
-
-        // Transfer ownership of bridge FD (consumes OwnedFd)
-        let bridge_fd = bridge_owned_fd.into_raw_fd();
-
-        // Keep vhci_owned_fd alive by leaking it (kernel will manage it)
-        std::mem::forget(vhci_owned_fd);
-
-        // Convert the bridge FD to a std UnixStream (takes ownership of FD)
-        let std_stream = unsafe { UnixStream::from_raw_fd(bridge_fd) };
-
-        // Set non-blocking mode for tokio
-        std_stream
-            .set_nonblocking(true)
-            .context("Failed to set socket non-blocking")?;
-
-        // Convert to tokio UnixStream
-        let tokio_stream = tokio::net::UnixStream::from_std(std_stream)
-            .context("Failed to create tokio UnixStream")?;
+        let server_addr = listener
+            .local_addr()
+            .context("Failed to get listener address")?;
 
         debug!(
-            "Created Unix socket bridge: devid={}, port={}, vhci_fd={}",
+            "TCP server listening on {} for device {} port {}",
+            server_addr, devid, port
+        );
+
+        // 2. Connect as client (this socket will be passed to vhci)
+        let mut client_stream = TcpStream::connect(server_addr)
+            .await
+            .context("Failed to connect to TCP server")?;
+
+        // 3. Accept the connection on server side
+        let (mut server_stream, client_addr) = listener
+            .accept()
+            .await
+            .context("Failed to accept connection")?;
+
+        debug!("Accepted TCP connection from {}", client_addr);
+
+        // 4. Get device info for handshake
+        let device_info = device_proxy.device_info();
+
+        // 5. Perform USB/IP handshake over the connection
+        // Client sends OP_REQ_IMPORT, server responds OP_REP_IMPORT
+        Self::perform_tcp_handshake(
+            &mut client_stream,
+            &mut server_stream,
+            device_info,
+            devid,
+            port,
+        )
+        .await
+        .context("Failed to perform USB/IP handshake")?;
+
+        // 6. Extract client FD for vhci_hcd (leak ownership)
+        let vhci_fd = client_stream.as_raw_fd();
+
+        debug!(
+            "USB/IP handshake complete, vhci_fd={} for device {} port {}",
+            vhci_fd, devid, port
+        );
+
+        // Keep client_stream alive by leaking it (kernel will manage it after sysfs attach)
+        std::mem::forget(client_stream);
+
+        // 7. Server side becomes our bridge
+        let bridge = Self {
+            device_proxy,
+            socket: Arc::new(Mutex::new(server_stream)),
+            devid,
+            port,
+            running: Arc::new(AtomicBool::new(true)),
+        };
+
+        debug!(
+            "Created TCP socket bridge: devid={}, port={}, vhci_fd={}",
             devid, port, vhci_fd
         );
 
-        Ok((
-            Self {
-                device_proxy,
-                socket: Arc::new(Mutex::new(tokio_stream)),
-                devid,
-                port,
-                running: Arc::new(AtomicBool::new(true)),
-            },
-            vhci_fd,
-        ))
+        Ok((bridge, vhci_fd))
     }
 
-    /// Perform USB/IP import handshake over socket
+    /// Perform USB/IP handshake over TCP connection
     ///
-    /// This simulates the OP_REQ_IMPORT / OP_REP_IMPORT exchange that
-    /// normally happens between usbip client and server. Since we control
-    /// both ends of the socket, we perform the handshake synchronously.
-    async fn perform_import_handshake(
-        socket_fd: &OwnedFd,
+    /// This performs a proper OP_REQ_IMPORT / OP_REP_IMPORT exchange
+    /// over the TCP connection before passing the FD to vhci_hcd.
+    ///
+    /// Client side sends OP_REQ_IMPORT, server side responds with OP_REP_IMPORT.
+    async fn perform_tcp_handshake(
+        client: &mut TcpStream,
+        server: &mut TcpStream,
         device_info: &protocol::DeviceInfo,
         devid: u32,
         port: u8,
     ) -> Result<()> {
-        use nix::unistd::write;
-
         debug!(
-            "Performing USB/IP import handshake for device {} on port {}",
+            "Performing USB/IP TCP handshake for device {} on port {}",
             devid, port
         );
 
         // Create bus ID (format: "port-devid")
         let busid = format!("{}-{}", port, devid);
 
-        // Send OP_REQ_IMPORT (client → server)
-        let req_import = UsbIpReqImport::new(&busid);
+        // Serialize OP_REQ_IMPORT
+        let req = UsbIpReqImport::new(&busid);
         let mut req_buf = Vec::new();
-        req_import
-            .write_to(&mut req_buf)
+        req.write_to(&mut req_buf)
             .context("Failed to serialize OP_REQ_IMPORT")?;
 
-        // Write to socket (this is normally done over TCP)
-        let written =
-            write(socket_fd, &req_buf).context("Failed to write OP_REQ_IMPORT to socket")?;
-
-        debug!("Sent OP_REQ_IMPORT: {} bytes", written);
-
-        // Send OP_REP_IMPORT (server → client)
-        let rep_import = UsbIpRepImport::from_device_info(device_info, &busid);
+        // Serialize OP_REP_IMPORT
+        let rep = UsbIpRepImport::from_device_info(device_info, &busid);
         let mut rep_buf = Vec::new();
-        rep_import
-            .write_to(&mut rep_buf)
+        rep.write_to(&mut rep_buf)
             .context("Failed to serialize OP_REP_IMPORT")?;
 
-        let written =
-            write(socket_fd, &rep_buf).context("Failed to write OP_REP_IMPORT to socket")?;
+        debug!(
+            "Handshake message sizes: OP_REQ_IMPORT={} bytes, OP_REP_IMPORT={} bytes",
+            req_buf.len(),
+            rep_buf.len()
+        );
 
-        debug!("Sent OP_REP_IMPORT: {} bytes", written);
+        // Split the TCP streams for independent read/write operations
+        // We need to use split() to get separate read and write halves
+        let (mut client_read, mut client_write) = client.split();
+        let (mut server_read, mut server_write) = server.split();
+
+        // Client sends OP_REQ_IMPORT
+        client_write
+            .write_all(&req_buf)
+            .await
+            .context("Failed to write OP_REQ_IMPORT")?;
+        client_write
+            .flush()
+            .await
+            .context("Failed to flush OP_REQ_IMPORT")?;
+
+        trace!("Client sent OP_REQ_IMPORT: {} bytes", req_buf.len());
+
+        // Server reads OP_REQ_IMPORT
+        let mut req_read_buf = vec![0u8; req_buf.len()];
+        server_read
+            .read_exact(&mut req_read_buf)
+            .await
+            .context("Failed to read OP_REQ_IMPORT")?;
+
+        trace!(
+            "Server received OP_REQ_IMPORT: {} bytes",
+            req_read_buf.len()
+        );
+
+        // Server sends OP_REP_IMPORT
+        server_write
+            .write_all(&rep_buf)
+            .await
+            .context("Failed to write OP_REP_IMPORT")?;
+        server_write
+            .flush()
+            .await
+            .context("Failed to flush OP_REP_IMPORT")?;
+
+        trace!("Server sent OP_REP_IMPORT: {} bytes", rep_buf.len());
+
+        // Client reads OP_REP_IMPORT
+        let mut rep_read_buf = vec![0u8; rep_buf.len()];
+        client_read
+            .read_exact(&mut rep_read_buf)
+            .await
+            .context("Failed to read OP_REP_IMPORT")?;
+
+        trace!(
+            "Client received OP_REP_IMPORT: {} bytes",
+            rep_read_buf.len()
+        );
 
         info!(
-            "USB/IP import handshake complete for device {} ({})",
+            "USB/IP TCP handshake complete for device {} ({})",
             devid, busid
         );
 

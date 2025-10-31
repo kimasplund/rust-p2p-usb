@@ -53,8 +53,10 @@ pub struct LinuxVirtualUsbManager {
     socket_bridges: Arc<RwLock<HashMap<DeviceHandle, Arc<SocketBridge>>>>,
     /// VHCI device path (e.g., /sys/devices/platform/vhci_hcd.0)
     vhci_path: PathBuf,
-    /// Next port to allocate (0-7)
-    next_port: Arc<RwLock<u8>>,
+    /// Next high-speed port to allocate (0-7 for USB 2.0 and below)
+    next_hs_port: Arc<RwLock<u8>>,
+    /// Next super-speed port to allocate (8-15 for USB 3.0+)
+    next_ss_port: Arc<RwLock<u8>>,
 }
 
 impl LinuxVirtualUsbManager {
@@ -73,7 +75,8 @@ impl LinuxVirtualUsbManager {
             attached_devices: Arc::new(RwLock::new(HashMap::new())),
             socket_bridges: Arc::new(RwLock::new(HashMap::new())),
             vhci_path,
-            next_port: Arc::new(RwLock::new(0)),
+            next_hs_port: Arc::new(RwLock::new(0)),  // High-speed ports: 0-7
+            next_ss_port: Arc::new(RwLock::new(8)),  // Super-speed ports: 8-15
         })
     }
 
@@ -118,11 +121,11 @@ impl LinuxVirtualUsbManager {
                 .context("Failed to attach to remote device")?;
         }
 
-        // Allocate a VHCI port
-        let port = self.allocate_port().await?;
-
         // Map device speed to USB/IP speed code
         let speed = map_device_speed(device_info.speed);
+
+        // Allocate a VHCI port (speed-aware: HS ports 0-7, SS ports 8-15)
+        let port = self.allocate_port(device_info.speed).await?;
 
         debug!(
             "Device speed mapping: {:?} -> {} (port={}, devid={})",
@@ -223,20 +226,44 @@ impl LinuxVirtualUsbManager {
         self.attached_devices.read().await.keys().copied().collect()
     }
 
-    /// Allocate a VHCI port
-    async fn allocate_port(&self) -> Result<u8> {
-        let mut next_port = self.next_port.write().await;
+    /// Allocate a VHCI port based on device speed
+    ///
+    /// vhci_hcd has separate port ranges:
+    /// - Ports 0-7: High-speed (hs) for USB 2.0 and below (Low, Full, High)
+    /// - Ports 8-15: Super-speed (ss) for USB 3.0+ (Super, SuperPlus)
+    async fn allocate_port(&self, speed: DeviceSpeed) -> Result<u8> {
+        match speed {
+            // USB 2.0 and below: use high-speed ports (0-7)
+            DeviceSpeed::Low | DeviceSpeed::Full | DeviceSpeed::High => {
+                let mut next_port = self.next_hs_port.write().await;
 
-        if *next_port >= 8 {
-            return Err(anyhow!(
-                "No available VHCI ports (maximum 8 devices supported)"
-            ));
+                if *next_port >= 8 {
+                    return Err(anyhow!(
+                        "No available high-speed VHCI ports (maximum 8 USB 2.0 devices supported)"
+                    ));
+                }
+
+                let port = *next_port;
+                *next_port += 1;
+
+                Ok(port)
+            }
+            // USB 3.0+: use super-speed ports (8-15)
+            DeviceSpeed::Super | DeviceSpeed::SuperPlus => {
+                let mut next_port = self.next_ss_port.write().await;
+
+                if *next_port >= 16 {
+                    return Err(anyhow!(
+                        "No available super-speed VHCI ports (maximum 8 USB 3.0+ devices supported)"
+                    ));
+                }
+
+                let port = *next_port;
+                *next_port += 1;
+
+                Ok(port)
+            }
         }
-
-        let port = *next_port;
-        *next_port += 1;
-
-        Ok(port)
     }
 
     /// Free a VHCI port

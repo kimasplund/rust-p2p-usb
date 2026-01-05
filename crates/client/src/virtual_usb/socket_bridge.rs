@@ -196,12 +196,22 @@ impl SocketBridge {
             // Handle the message based on type
             match message {
                 UsbIpMessage::Submit { header, cmd, data } => {
+                    eprintln!(
+                        "[SocketBridge] Received CMD_SUBMIT: seqnum={}, ep={}, direction={}, transfer_len={}, setup={:02x?}",
+                        header.seqnum, header.ep, header.direction, cmd.transfer_buffer_length, cmd.setup
+                    );
                     debug!(
                         "Received CMD_SUBMIT: seqnum={}, ep={}, direction={}",
                         header.seqnum, header.ep, header.direction
                     );
-                    if let Err(e) = self.handle_cmd_submit_blocking(rt, header, cmd, data) {
-                        error!("Failed to handle CMD_SUBMIT: {:#}", e);
+                    match self.handle_cmd_submit_blocking(rt, header, cmd, data) {
+                        Ok(()) => {
+                            eprintln!("[SocketBridge] CMD_SUBMIT handled successfully");
+                        }
+                        Err(e) => {
+                            eprintln!("[SocketBridge] CMD_SUBMIT error: {:#}", e);
+                            error!("Failed to handle CMD_SUBMIT: {:#}", e);
+                        }
                     }
                 }
                 UsbIpMessage::Unlink { header, cmd } => {
@@ -229,21 +239,38 @@ impl SocketBridge {
             .lock()
             .map_err(|e| anyhow!("Failed to lock socket: {}", e))?;
 
+        eprintln!(
+            "[SocketBridge] Waiting to read from socket for device {} port {} (blocking)",
+            self.devid, self.port
+        );
         debug!(
             "Attempting to read from socket for device {} port {}",
             self.devid, self.port
         );
 
+        // Set a read timeout so we can detect if kernel stops sending
+        socket.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+        eprintln!("[SocketBridge] Set 10-second read timeout");
+
         // Read header (20 bytes)
         let mut header_buf = vec![0u8; UsbIpHeader::SIZE];
+        eprintln!("[SocketBridge] Calling read_exact for {} bytes...", UsbIpHeader::SIZE);
         match socket.read_exact(&mut header_buf) {
             Ok(()) => {
+                eprintln!(
+                    "[SocketBridge] Successfully read {} bytes for device {} port {}",
+                    header_buf.len(), self.devid, self.port
+                );
                 debug!(
                     "Successfully read {} bytes for device {} port {}",
                     header_buf.len(), self.devid, self.port
                 );
             }
             Err(e) => {
+                eprintln!(
+                    "[SocketBridge] Read failed for device {} port {}: kind={:?}, error={}",
+                    self.devid, self.port, e.kind(), e
+                );
                 debug!(
                     "Read failed for device {} port {}: kind={:?}, error={}",
                     self.devid, self.port, e.kind(), e
@@ -291,8 +318,11 @@ impl SocketBridge {
                 Ok(UsbIpMessage::Submit { header, cmd, data })
             }
             UsbIpCommand::CmdUnlink => {
-                // Read CMD_UNLINK payload (4 bytes: seqnum_unlink)
-                let mut unlink_buf = vec![0u8; UsbIpCmdUnlink::SIZE];
+                // USB/IP header union is always 28 bytes (size of largest member: cmd_submit)
+                // CMD_UNLINK only uses first 4 bytes (seqnum_unlink), rest is padding
+                // We must read all 28 bytes to stay in sync with the protocol
+                const UNION_SIZE: usize = 28;
+                let mut unlink_buf = vec![0u8; UNION_SIZE];
                 socket
                     .read_exact(&mut unlink_buf)
                     .context("Failed to read CMD_UNLINK payload")?;
@@ -405,6 +435,10 @@ impl SocketBridge {
         let mut header_buf = Vec::new();
         header.write_to(&mut header_buf)?;
 
+        eprintln!(
+            "[SocketBridge] Sending RET_SUBMIT: seqnum={}, devid={}, status={}, actual_length={}, data_len={}",
+            request_header.seqnum, request_header.devid, ret.status, ret.actual_length, data.len()
+        );
         debug!(
             "Writing RET_SUBMIT header: command={:#06x}, seqnum={}, devid={}, direction={}, ep={}, header_bytes={:02x?}",
             header.command,
@@ -430,6 +464,12 @@ impl SocketBridge {
 
         socket.write_all(&ret_buf)?;
 
+        // USB/IP header is always 48 bytes (20 header + 28 union payload)
+        // RET_SUBMIT payload is only 20 bytes, so we need 8 bytes of padding
+        // to match the kernel's expected header size
+        const RET_SUBMIT_PADDING: usize = 8;
+        socket.write_all(&[0u8; RET_SUBMIT_PADDING])?;
+
         // Write response data if any
         if !data.is_empty() {
             debug!("Writing RET_SUBMIT data: {} bytes", data.len());
@@ -437,6 +477,15 @@ impl SocketBridge {
         }
 
         socket.flush()?;
+
+        let total_len = header_buf.len() + ret_buf.len() + RET_SUBMIT_PADDING + data.len();
+        eprintln!("[SocketBridge] RET_SUBMIT sent and flushed for seqnum={}, total_bytes={} (header={}, ret={}, padding={}, data={})",
+            request_header.seqnum, total_len, header_buf.len(), ret_buf.len(), RET_SUBMIT_PADDING, data.len());
+        eprintln!("[SocketBridge] RET_SUBMIT header hex: {:02x?}", &header_buf);
+        eprintln!("[SocketBridge] RET_SUBMIT payload hex: {:02x?}", &ret_buf);
+        if !data.is_empty() {
+            eprintln!("[SocketBridge] RET_SUBMIT data hex: {:02x?}", &data[..data.len().min(64)]);
+        }
 
         Ok(())
     }
@@ -540,9 +589,11 @@ impl SocketBridge {
 
         socket.write_all(&ret_buf)?;
 
-        // Padding: kernel expects same size as RET_SUBMIT payload (20 bytes total)
-        // We wrote 4 bytes for status, so pad with 16 bytes
-        socket.write_all(&[0u8; 16])?;
+        // USB/IP header union is always 28 bytes (size of largest member: cmd_submit)
+        // RET_UNLINK only uses 4 bytes (status), rest must be padding
+        // We wrote 4 bytes for status, so pad with 24 bytes to reach 28
+        const RET_UNLINK_PADDING: usize = 24;
+        socket.write_all(&[0u8; RET_UNLINK_PADDING])?;
 
         socket.flush()?;
 

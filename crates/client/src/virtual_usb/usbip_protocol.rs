@@ -356,21 +356,42 @@ pub async fn usbip_to_usb_request(
         }
     } else {
         // Bulk or Interrupt transfer based on endpoint and interval
-        let endpoint = header.ep as u8;
+        // IMPORTANT: USB/IP header.ep only contains the endpoint NUMBER (0-15).
+        // The direction is stored separately in header.direction (0=OUT, 1=IN).
+        // USB APIs expect the direction bit in the endpoint address:
+        // - OUT endpoint 2 = 0x02
+        // - IN endpoint 2 = 0x82 (bit 7 set for IN)
+        let endpoint = if header.direction == 1 {
+            header.ep as u8 | 0x80 // IN: set direction bit
+        } else {
+            header.ep as u8 // OUT: no direction bit
+        };
         let timeout_ms = 5000; // Default 5 second timeout
+
+        // For IN transfers, we need to tell the server how much data to read.
+        // The server uses data.len() as the buffer size, so for IN transfers
+        // we create a buffer of the expected size (transfer_buffer_length).
+        // For OUT transfers, data already contains the data to send.
+        let transfer_data = if header.direction == 1 {
+            // IN transfer: create buffer of expected size
+            vec![0u8; cmd.transfer_buffer_length as usize]
+        } else {
+            // OUT transfer: use the data from the request
+            data
+        };
 
         if cmd.interval > 0 {
             // Interrupt transfer (has polling interval)
             TransferType::Interrupt {
                 endpoint,
-                data,
+                data: transfer_data,
                 timeout_ms,
             }
         } else {
             // Bulk transfer
             TransferType::Bulk {
                 endpoint,
-                data,
+                data: transfer_data,
                 timeout_ms,
             }
         }

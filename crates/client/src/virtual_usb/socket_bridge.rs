@@ -125,14 +125,30 @@ impl SocketBridge {
     /// the tokio runtime.
     pub fn start(self: Arc<Self>) {
         let bridge = self.clone();
+        let devid = self.devid;
+        let port = self.port;
+
+        // Capture runtime handle BEFORE spawn_blocking
+        // This ensures we have access to the tokio runtime from within the blocking thread
+        let rt = tokio::runtime::Handle::current();
+
+        info!("Spawning socket bridge thread for device {} port {}", devid, port);
+
         // Use spawn_blocking for synchronous socket I/O
         tokio::task::spawn_blocking(move || {
-            // Create a new tokio runtime handle for async device_proxy calls
-            let rt = tokio::runtime::Handle::current();
+            // Use eprintln for immediate output (not buffered through tracing)
+            eprintln!("[SocketBridge] spawn_blocking closure entered for device {} port {}", devid, port);
+            info!("Socket bridge thread started for device {} port {}", devid, port);
+
             if let Err(e) = bridge.run_blocking(&rt) {
                 error!("Socket bridge error: {:#}", e);
+                eprintln!("[SocketBridge] Error: {:#}", e);
             }
+
+            eprintln!("[SocketBridge] spawn_blocking closure exiting for device {} port {}", devid, port);
         });
+
+        info!("spawn_blocking task scheduled for device {} port {}", devid, port);
     }
 
     /// Stop the bridge

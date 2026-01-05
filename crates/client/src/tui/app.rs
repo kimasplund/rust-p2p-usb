@@ -22,6 +22,7 @@ pub enum ServerStatus {
 
 /// Virtual device attachment status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum DeviceStatus {
     /// Available but not attached
     Available,
@@ -165,6 +166,7 @@ impl App {
     }
 
     /// Remove a server from the list
+    #[allow(dead_code)]
     pub fn remove_server(&mut self, endpoint_id: &EndpointId) {
         self.servers.remove(endpoint_id);
         self.server_order.retain(|id| id != endpoint_id);
@@ -482,6 +484,7 @@ impl App {
     }
 
     /// Clear status message
+    #[allow(dead_code)]
     pub fn clear_status(&mut self) {
         self.status_message = None;
     }

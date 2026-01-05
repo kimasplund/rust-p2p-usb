@@ -73,6 +73,7 @@ pub struct App {
 
 /// Network events for updating the TUI
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum NetworkEvent {
     /// Client connected
     ClientConnected { endpoint_id: String },

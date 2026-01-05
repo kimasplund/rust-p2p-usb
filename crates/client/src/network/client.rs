@@ -103,6 +103,7 @@ impl IrohClient {
     }
 
     /// Add a server to the allowlist
+    #[allow(dead_code)]
     pub async fn add_allowed_server(&self, server_id: EndpointId) {
         let mut allowlist = self.allowed_servers.write().await;
         allowlist.insert(server_id);
@@ -110,6 +111,7 @@ impl IrohClient {
     }
 
     /// Remove a server from the allowlist
+    #[allow(dead_code)]
     pub async fn remove_allowed_server(&self, server_id: EndpointId) {
         let mut allowlist = self.allowed_servers.write().await;
         allowlist.remove(&server_id);
@@ -308,6 +310,7 @@ impl IrohClient {
     /// Shutdown the client gracefully
     ///
     /// Closes all connections and shuts down the Iroh endpoint.
+    #[allow(dead_code)]
     pub async fn shutdown(self) -> Result<()> {
         info!("Shutting down client");
 

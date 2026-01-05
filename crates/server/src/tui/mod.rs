@@ -44,5 +44,8 @@ pub mod events;
 pub mod ui;
 
 // Re-export main types for external use
-pub use app::{App, DeviceState, Dialog, NetworkEvent, Tui, run};
+pub use app::run;
+#[allow(unused_imports)]
+pub use app::{App, DeviceState, Dialog, NetworkEvent, Tui};
+#[allow(unused_imports)]
 pub use events::{Action, Event, EventHandler};

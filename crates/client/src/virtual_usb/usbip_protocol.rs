@@ -17,10 +17,13 @@ use protocol::{RequestId, TransferType, UsbRequest, UsbResponse};
 use std::io::{Read, Write};
 
 /// USB/IP protocol version
+#[allow(dead_code)]
 pub const USBIP_VERSION: u16 = 0x0111; // Version 1.1.1
 
 /// USB/IP import/export commands
+#[allow(dead_code)]
 pub const OP_REQ_IMPORT: u16 = 0x8003;
+#[allow(dead_code)]
 pub const OP_REP_IMPORT: u16 = 0x0003;
 
 /// USB/IP command codes
@@ -144,6 +147,7 @@ impl UsbIpHeader {
 ///
 /// Follows the common header when vhci_hcd sends a USB request
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct UsbIpCmdSubmit {
     /// Transfer flags
     pub transfer_flags: u32,
@@ -159,6 +163,7 @@ pub struct UsbIpCmdSubmit {
     pub setup: [u8; 8],
 }
 
+#[allow(dead_code)]
 impl UsbIpCmdSubmit {
     /// Size of CMD_SUBMIT payload in bytes (28 bytes: 5 x u32 + 8-byte setup)
     /// Linux kernel struct is __packed, so no padding after setup[8]
@@ -223,6 +228,7 @@ pub struct UsbIpRetSubmit {
 impl UsbIpRetSubmit {
     /// Size of RET_SUBMIT payload in bytes (20 bytes: 5 x i32)
     /// Combined with UsbIpHeader (20 bytes), total message is 40 bytes
+    #[allow(dead_code)]
     pub const SIZE: usize = 20;
 
     /// Create a successful return
@@ -586,6 +592,7 @@ mod tests {
 ///
 /// Sent by client to request importing a USB device
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct UsbIpReqImport {
     /// USB/IP version (0x0111)
     pub version: u16,
@@ -597,6 +604,7 @@ pub struct UsbIpReqImport {
     pub busid: [u8; 32],
 }
 
+#[allow(dead_code)]
 impl UsbIpReqImport {
     pub fn new(busid: &str) -> Self {
         let mut busid_bytes = [0u8; 32];

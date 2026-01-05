@@ -29,6 +29,7 @@ impl EventHandler {
     }
 
     /// Create event handler with custom tick rate
+    #[allow(dead_code)]
     pub fn with_tick_rate(tick_rate: Duration) -> Self {
         Self { tick_rate }
     }
@@ -150,17 +151,20 @@ impl EventHandler {
 }
 
 /// Async event handler for use with tokio
+#[allow(dead_code)]
 pub struct AsyncEventHandler {
     /// Inner synchronous handler
     inner: EventHandler,
 }
 
+#[allow(dead_code)]
 impl Default for AsyncEventHandler {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[allow(dead_code)]
 impl AsyncEventHandler {
     /// Create a new async event handler
     pub fn new() -> Self {

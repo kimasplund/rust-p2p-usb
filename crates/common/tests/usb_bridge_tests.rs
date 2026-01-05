@@ -12,10 +12,9 @@
 //! Run with: `cargo test -p common --test usb_bridge_tests`
 
 use common::test_utils::{
-    create_mock_device_info, create_mock_device_list, create_mock_handle, create_mock_request_id,
-    with_timeout, DEFAULT_TEST_TIMEOUT,
+    create_mock_device_info, create_mock_device_list, with_timeout, DEFAULT_TEST_TIMEOUT,
 };
-use common::{UsbBridge, UsbCommand, UsbEvent, UsbWorker, create_usb_bridge};
+use common::{UsbCommand, UsbEvent, create_usb_bridge};
 use protocol::{
     DeviceHandle, DeviceId, RequestId, TransferResult, TransferType, UsbRequest, UsbResponse,
 };

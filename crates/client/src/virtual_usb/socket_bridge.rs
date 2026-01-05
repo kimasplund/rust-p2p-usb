@@ -35,6 +35,7 @@ use super::usbip_protocol::*;
 use crate::network::device_proxy::DeviceProxy;
 use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
+use std::io::Write as StdWrite;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
@@ -71,15 +72,16 @@ impl SocketBridge {
     /// Returns (SocketBridge, raw_fd_for_vhci)
     /// The raw FD should be passed to vhci_hcd via sysfs attach
     ///
-    /// IMPORTANT: The handshake will happen AFTER attach, initiated by the kernel.
-    /// Do NOT perform the handshake before passing vhci_fd to the kernel!
+    /// IMPORTANT: The USB/IP import handshake (OP_REP_IMPORT) MUST be written to the socket
+    /// BEFORE passing the FD to the kernel. The kernel reads device info from the socket
+    /// when attaching.
     pub async fn new(
         device_proxy: Arc<DeviceProxy>,
         devid: u32,
         port: u8,
     ) -> Result<(Self, RawFd)> {
         // 1. Create Unix socketpair (we control both ends)
-        let (vhci_stream, bridge_stream) =
+        let (vhci_stream, mut bridge_stream) =
             UnixStream::pair().context("Failed to create Unix socketpair")?;
 
         debug!(
@@ -90,13 +92,38 @@ impl SocketBridge {
             bridge_stream.as_raw_fd()
         );
 
-        // 2. Extract vhci FD before converting to tokio
-        // The kernel will use this FD for reading device metadata and initiating the handshake
+        // 2. Extract vhci FD before any operations
         let vhci_fd = vhci_stream.as_raw_fd();
 
-        // 3. Keep vhci_stream alive (don't leak it!)
-        // The kernel will duplicate the FD when we pass it via sysfs,
-        // so we need to keep our copy alive to prevent socketpair closure
+        // 3. Write OP_REP_IMPORT to the bridge socket BEFORE kernel attachment
+        // The kernel will read this data when the socket is attached to vhci_hcd
+        let device_info = device_proxy.device_info();
+        let busid = format!("{}-{}", device_info.bus_number, device_info.device_address);
+        let import_reply = UsbIpRepImport::from_device_info(device_info, &busid);
+
+        let mut import_buf = Vec::new();
+        import_reply
+            .write_to(&mut import_buf)
+            .context("Failed to serialize OP_REP_IMPORT")?;
+
+        debug!(
+            "Writing OP_REP_IMPORT ({} bytes) for device {} (busid: {})",
+            import_buf.len(),
+            devid,
+            busid
+        );
+
+        bridge_stream
+            .write_all(&import_buf)
+            .context("Failed to write OP_REP_IMPORT to socket")?;
+        bridge_stream
+            .flush()
+            .context("Failed to flush OP_REP_IMPORT")?;
+
+        info!(
+            "Sent USB/IP import reply for device {} (VID:{:04x} PID:{:04x})",
+            devid, device_info.vendor_id, device_info.product_id
+        );
 
         // 4. Convert bridge_stream to tokio for async operations
         // We need to set non-blocking mode first
@@ -120,7 +147,7 @@ impl SocketBridge {
         };
 
         debug!(
-            "Created Unix socketpair bridge: devid={}, port={}, vhci_fd={} (handshake will happen after attach)",
+            "Created Unix socketpair bridge: devid={}, port={}, vhci_fd={} (import handshake complete)",
             devid, port, vhci_fd
         );
 
@@ -151,8 +178,9 @@ impl SocketBridge {
             self.devid, self.port
         );
 
-        // The kernel expects the socket to be ready for CMD_SUBMIT/RET_SUBMIT immediately
-        // There is no handshake - the handshake happens externally before the FD is passed to vhci_hcd
+        // The kernel expects the socket to be ready for CMD_SUBMIT/RET_SUBMIT after attach.
+        // The OP_REP_IMPORT handshake was already completed in SocketBridge::new() before
+        // the socket FD was passed to vhci_hcd.
 
         info!(
             "Socket bridge ready for device {} on port {}, entering main loop",

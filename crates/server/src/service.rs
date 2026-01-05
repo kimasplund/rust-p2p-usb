@@ -49,6 +49,7 @@ pub fn notify_stopping() -> Result<()> {
 /// Notify systemd that the service is reloading configuration
 ///
 /// Use this when implementing configuration reload functionality.
+#[allow(dead_code)]
 pub fn notify_reloading() -> Result<()> {
     if let Ok(socket_path) = env::var("NOTIFY_SOCKET") {
         let socket = UnixDatagram::unbound().context("Failed to create Unix socket")?;

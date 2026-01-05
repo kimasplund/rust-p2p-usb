@@ -16,6 +16,7 @@ use crate::network::device_proxy::DeviceProxy;
 /// Represents a virtual USB device attached to the system via USB/IP.
 /// This struct maintains the state needed to proxy USB operations
 /// from the kernel to the remote device.
+#[allow(dead_code)]
 pub struct VirtualDevice {
     /// Device handle
     handle: DeviceHandle,
@@ -29,6 +30,7 @@ pub struct VirtualDevice {
     next_request_id: AtomicU64,
 }
 
+#[allow(dead_code)]
 impl VirtualDevice {
     /// Create a new virtual device
     ///

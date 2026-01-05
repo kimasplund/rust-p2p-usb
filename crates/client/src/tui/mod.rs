@@ -43,7 +43,7 @@ use crate::network::IrohClient;
 use crate::virtual_usb::VirtualUsbManager;
 
 pub use app::{App, AppAction, DeviceStatus, ServerStatus};
-pub use events::{AsyncEventHandler, EventHandler};
+pub use events::EventHandler;
 
 /// Messages sent from async tasks to the TUI
 #[derive(Debug)]
@@ -123,6 +123,7 @@ impl TuiRunner {
     }
 
     /// Get a clone of the message sender for async tasks
+    #[allow(dead_code)]
     pub fn message_sender(&self) -> mpsc::Sender<TuiMessage> {
         self.message_tx.clone()
     }

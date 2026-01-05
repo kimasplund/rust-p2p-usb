@@ -53,11 +53,13 @@ impl DeviceProxy {
     }
 
     /// Get device ID
+    #[allow(dead_code)]
     pub fn device_id(&self) -> DeviceId {
         self.info.id
     }
 
     /// Get server NodeId
+    #[allow(dead_code)]
     pub fn server_id(&self) -> EndpointId {
         self.server_id
     }
@@ -145,6 +147,7 @@ impl DeviceProxy {
     ///
     /// # Returns
     /// Transfer result with data (for IN transfers)
+    #[allow(dead_code)]
     pub async fn control_transfer(
         &self,
         request_id: RequestId,
@@ -181,6 +184,7 @@ impl DeviceProxy {
     ///
     /// # Returns
     /// Transfer result with data (for IN transfers)
+    #[allow(dead_code)]
     pub async fn interrupt_transfer(
         &self,
         request_id: RequestId,
@@ -213,6 +217,7 @@ impl DeviceProxy {
     ///
     /// # Returns
     /// Transfer result with data (for IN transfers)
+    #[allow(dead_code)]
     pub async fn bulk_transfer(
         &self,
         request_id: RequestId,

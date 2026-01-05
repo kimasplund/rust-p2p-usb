@@ -19,6 +19,7 @@ use tracing::{debug, error, info, warn};
 
 /// Connection state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ConnectionState {
     /// Disconnected
     Disconnected,
@@ -156,6 +157,7 @@ impl ServerConnection {
     }
 
     /// Get current connection state
+    #[allow(dead_code)]
     pub async fn state(&self) -> ConnectionState {
         *self.state.read().await
     }
@@ -317,6 +319,7 @@ impl ServerConnection {
     }
 
     /// Generate next request ID
+    #[allow(dead_code)]
     pub fn next_request_id(&self) -> RequestId {
         let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         RequestId(id)

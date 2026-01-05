@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 
 /// Terminal event types
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Event {
     /// Keyboard input event
     Key(KeyEvent),

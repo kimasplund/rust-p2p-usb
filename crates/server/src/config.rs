@@ -213,6 +213,7 @@ impl ServerConfig {
 }
 
 /// Legacy load_config function for backward compatibility
+#[allow(dead_code)]
 pub fn load_config(path: &str) -> Result<ServerConfig> {
     let path_buf = PathBuf::from(shellexpand::tilde(path).as_ref());
     ServerConfig::load(Some(path_buf))

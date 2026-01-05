@@ -18,6 +18,7 @@ use super::device_proxy::DeviceProxy;
 ///
 /// Represents an active session with a USB server, tracking
 /// attached devices and managing their lifecycle.
+#[allow(dead_code)]
 pub struct ServerSession {
     /// Server EndpointId
     server_id: EndpointId,
@@ -29,6 +30,7 @@ pub struct ServerSession {
     client: Arc<IrohClient>,
 }
 
+#[allow(dead_code)]
 impl ServerSession {
     /// Create a new server session
     ///

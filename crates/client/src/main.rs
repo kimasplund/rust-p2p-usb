@@ -14,6 +14,7 @@ use common::setup_logging;
 use iroh::PublicKey as EndpointId;
 use network::{ClientConfig as NetworkClientConfig, IrohClient};
 use std::sync::Arc;
+use tokio::signal;
 use tracing::{error, info, warn};
 use virtual_usb::VirtualUsbManager;
 
@@ -62,6 +63,10 @@ struct Args {
     /// Log level (trace, debug, info, warn, error)
     #[arg(short, long, value_name = "LEVEL")]
     log_level: Option<String>,
+
+    /// Run in headless mode (no TUI, stay connected until Ctrl+C)
+    #[arg(long)]
+    headless: bool,
 }
 
 #[tokio::main]
@@ -115,7 +120,7 @@ async fn main() -> Result<()> {
 
     // Handle specific connection request or run TUI
     let result = if let Some(server_id_str) = args.connect {
-        connect_and_run(client, virtual_usb.clone(), &server_id_str, &config).await
+        connect_and_run(client, virtual_usb.clone(), &server_id_str, &config, args.headless).await
     } else {
         run_tui_mode(client, virtual_usb.clone(), &config).await
     };
@@ -156,6 +161,7 @@ async fn connect_and_run(
     virtual_usb: Arc<VirtualUsbManager>,
     server_id_str: &str,
     config: &config::ClientConfig,
+    headless: bool,
 ) -> Result<()> {
     info!("Connecting to server: {}", server_id_str);
 
@@ -216,8 +222,12 @@ async fn connect_and_run(
         }
     }
 
-    // If auto-connect is enabled, launch TUI for interactive management
-    if config.client.auto_connect {
+    // If headless mode, wait for Ctrl+C; otherwise launch TUI
+    if headless {
+        info!("Running in headless mode. Press Ctrl+C to shutdown.");
+        signal::ctrl_c().await.context("Failed to wait for Ctrl+C")?;
+        info!("Received Ctrl+C, shutting down...");
+    } else if config.client.auto_connect {
         info!("Auto-connect enabled, launching TUI for interactive management");
         // Run TUI - it handles cleanup internally
         return tui::run(client, virtual_usb, config).await;

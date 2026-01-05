@@ -143,6 +143,7 @@ impl ClientConfig {
 }
 
 /// Legacy load_config function for backward compatibility
+#[allow(dead_code)]
 pub fn load_config(path: &str) -> Result<ClientConfig> {
     let path_buf = PathBuf::from(shellexpand::tilde(path).as_ref());
     ClientConfig::load(Some(path_buf))

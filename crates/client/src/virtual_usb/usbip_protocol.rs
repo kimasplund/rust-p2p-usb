@@ -668,6 +668,7 @@ pub struct UsbIpRepImport {
     pub b_num_interfaces: u8,
 }
 
+#[allow(dead_code)]
 impl UsbIpRepImport {
     pub fn from_device_info(info: &protocol::DeviceInfo, busid: &str) -> Self {
         let mut busid_bytes = [0u8; 32];
@@ -719,6 +720,7 @@ impl UsbIpRepImport {
 }
 
 /// Map DeviceSpeed enum to USB/IP protocol speed value
+#[allow(dead_code)]
 fn map_device_speed_to_u32(speed: protocol::DeviceSpeed) -> u32 {
     match speed {
         protocol::DeviceSpeed::Low => 1,

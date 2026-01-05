@@ -35,14 +35,12 @@ use super::usbip_protocol::*;
 use crate::network::device_proxy::DeviceProxy;
 use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
-use std::io::Write as StdWrite;
+use std::io::{Read, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream as TokioUnixStream;
-use tokio::sync::{Mutex, RwLock, oneshot};
+use tokio::sync::{RwLock, oneshot};
 use tracing::{debug, error, info, trace};
 
 /// Socket bridge for USB/IP protocol
@@ -52,9 +50,10 @@ pub struct SocketBridge {
     /// Device proxy for communicating with remote USB device
     device_proxy: Arc<DeviceProxy>,
     /// Unix socket (our end of socketpair) connected to vhci_hcd
-    socket: Arc<Mutex<TokioUnixStream>>,
+    /// Using std::sync::Mutex for synchronous blocking I/O
+    socket: Arc<std::sync::Mutex<UnixStream>>,
     /// vhci FD stream (kept alive to prevent socketpair from closing)
-    _vhci_stream: std::os::unix::net::UnixStream,
+    _vhci_stream: UnixStream,
     /// Device ID for USB/IP protocol
     devid: u32,
     /// Port number on vhci_hcd
@@ -72,16 +71,16 @@ impl SocketBridge {
     /// Returns (SocketBridge, raw_fd_for_vhci)
     /// The raw FD should be passed to vhci_hcd via sysfs attach
     ///
-    /// IMPORTANT: The USB/IP import handshake (OP_REP_IMPORT) MUST be written to the socket
-    /// BEFORE passing the FD to the kernel. The kernel reads device info from the socket
-    /// when attaching.
+    /// Note: The socket should be clean - no import handshake is needed.
+    /// vhci_hcd receives device info via sysfs attach parameters (devid, speed, etc.),
+    /// and immediately starts CMD_SUBMIT/RET_SUBMIT communication on the socket.
     pub async fn new(
         device_proxy: Arc<DeviceProxy>,
         devid: u32,
         port: u8,
     ) -> Result<(Self, RawFd)> {
         // 1. Create Unix socketpair (we control both ends)
-        let (vhci_stream, mut bridge_stream) =
+        let (vhci_stream, bridge_stream) =
             UnixStream::pair().context("Failed to create Unix socketpair")?;
 
         debug!(
@@ -95,50 +94,15 @@ impl SocketBridge {
         // 2. Extract vhci FD before any operations
         let vhci_fd = vhci_stream.as_raw_fd();
 
-        // 3. Write OP_REP_IMPORT to the bridge socket BEFORE kernel attachment
-        // The kernel will read this data when the socket is attached to vhci_hcd
-        let device_info = device_proxy.device_info();
-        let busid = format!("{}-{}", device_info.bus_number, device_info.device_address);
-        let import_reply = UsbIpRepImport::from_device_info(device_info, &busid);
+        // 3. Keep bridge_stream in BLOCKING mode for synchronous I/O
+        // The socket bridge will run in a blocking thread (spawn_blocking)
+        // This avoids potential issues with tokio's async FD handling
 
-        let mut import_buf = Vec::new();
-        import_reply
-            .write_to(&mut import_buf)
-            .context("Failed to serialize OP_REP_IMPORT")?;
-
-        debug!(
-            "Writing OP_REP_IMPORT ({} bytes) for device {} (busid: {})",
-            import_buf.len(),
-            devid,
-            busid
-        );
-
-        bridge_stream
-            .write_all(&import_buf)
-            .context("Failed to write OP_REP_IMPORT to socket")?;
-        bridge_stream
-            .flush()
-            .context("Failed to flush OP_REP_IMPORT")?;
-
-        info!(
-            "Sent USB/IP import reply for device {} (VID:{:04x} PID:{:04x})",
-            devid, device_info.vendor_id, device_info.product_id
-        );
-
-        // 4. Convert bridge_stream to tokio for async operations
-        // We need to set non-blocking mode first
-        bridge_stream
-            .set_nonblocking(true)
-            .context("Failed to set bridge_stream to non-blocking")?;
-
-        let bridge_stream_tokio = TokioUnixStream::from_std(bridge_stream)
-            .context("Failed to convert bridge_stream to tokio")?;
-
-        // 5. Keep BOTH socketpair ends alive for ongoing communication
+        // 4. Keep BOTH socketpair ends alive for ongoing communication
         // vhci_stream is stored to prevent socketpair from closing when kernel closes its dup'd FD
         let bridge = Self {
             device_proxy,
-            socket: Arc::new(Mutex::new(bridge_stream_tokio)),
+            socket: Arc::new(std::sync::Mutex::new(bridge_stream)),
             _vhci_stream: vhci_stream,
             devid,
             port,
@@ -147,7 +111,7 @@ impl SocketBridge {
         };
 
         debug!(
-            "Created Unix socketpair bridge: devid={}, port={}, vhci_fd={} (import handshake complete)",
+            "Created Unix socketpair bridge: devid={}, port={}, vhci_fd={} (ready for CMD_SUBMIT)",
             devid, port, vhci_fd
         );
 
@@ -156,11 +120,16 @@ impl SocketBridge {
 
     /// Start the bridge task
     ///
-    /// This spawns a tokio task that handles USB/IP protocol translation
+    /// This spawns a blocking thread that handles USB/IP protocol translation.
+    /// Using spawn_blocking ensures the blocking socket I/O doesn't starve
+    /// the tokio runtime.
     pub fn start(self: Arc<Self>) {
         let bridge = self.clone();
-        tokio::spawn(async move {
-            if let Err(e) = bridge.run().await {
+        // Use spawn_blocking for synchronous socket I/O
+        tokio::task::spawn_blocking(move || {
+            // Create a new tokio runtime handle for async device_proxy calls
+            let rt = tokio::runtime::Handle::current();
+            if let Err(e) = bridge.run_blocking(&rt) {
                 error!("Socket bridge error: {:#}", e);
             }
         });
@@ -171,16 +140,15 @@ impl SocketBridge {
         self.running.store(false, Ordering::Release);
     }
 
-    /// Main bridge loop
-    async fn run(&self) -> Result<()> {
+    /// Main bridge loop (blocking version)
+    ///
+    /// Runs in a spawn_blocking thread with synchronous socket I/O.
+    /// Uses the tokio runtime handle to call async DeviceProxy methods.
+    fn run_blocking(&self, rt: &tokio::runtime::Handle) -> Result<()> {
         info!(
             "Starting USB/IP socket bridge for device {} on port {}",
             self.devid, self.port
         );
-
-        // The kernel expects the socket to be ready for CMD_SUBMIT/RET_SUBMIT after attach.
-        // The OP_REP_IMPORT handshake was already completed in SocketBridge::new() before
-        // the socket FD was passed to vhci_hcd.
 
         info!(
             "Socket bridge ready for device {} on port {}, entering main loop",
@@ -189,16 +157,22 @@ impl SocketBridge {
 
         // Enter the main loop for CMD_SUBMIT/RET_SUBMIT
         while self.running.load(Ordering::Acquire) {
-            // Read USB/IP message from vhci_hcd
-            let message = match self.read_usbip_message().await {
+            // Read USB/IP message from vhci_hcd (blocking I/O)
+            let message = match self.read_usbip_message_blocking() {
                 Ok(msg) => msg,
                 Err(e) => {
                     // Check if connection was closed gracefully
-                    if e.to_string().contains("unexpected end of file") {
+                    let err_str = e.to_string();
+                    if err_str.contains("unexpected end of file")
+                        || err_str.contains("end of file")
+                        || err_str.contains("early eof")
+                    {
                         info!("vhci_hcd closed connection for port {}", self.port);
                         break;
                     }
                     error!("Failed to read USB/IP message: {:#}", e);
+                    // On error, sleep briefly to avoid tight loop
+                    std::thread::sleep(std::time::Duration::from_millis(10));
                     continue;
                 }
             };
@@ -206,18 +180,22 @@ impl SocketBridge {
             // Handle the message based on type
             match message {
                 UsbIpMessage::Submit { header, cmd, data } => {
-                    trace!(
+                    debug!(
                         "Received CMD_SUBMIT: seqnum={}, ep={}, direction={}",
                         header.seqnum, header.ep, header.direction
                     );
-                    self.handle_cmd_submit(header, cmd, data).await?;
+                    if let Err(e) = self.handle_cmd_submit_blocking(rt, header, cmd, data) {
+                        error!("Failed to handle CMD_SUBMIT: {:#}", e);
+                    }
                 }
                 UsbIpMessage::Unlink { header, cmd } => {
                     trace!(
                         "Received CMD_UNLINK: seqnum={}, seqnum_unlink={}",
                         header.seqnum, cmd.seqnum_unlink
                     );
-                    self.handle_cmd_unlink(header, cmd).await?;
+                    if let Err(e) = self.handle_cmd_unlink_blocking(rt, header, cmd) {
+                        error!("Failed to handle CMD_UNLINK: {:#}", e);
+                    }
                 }
             }
         }
@@ -226,17 +204,36 @@ impl SocketBridge {
         Ok(())
     }
 
-    /// Read a USB/IP message from the socket
+    /// Read a USB/IP message from the socket (blocking version)
     ///
     /// Returns a parsed UsbIpMessage (either Submit or Unlink)
-    async fn read_usbip_message(&self) -> Result<UsbIpMessage> {
-        let mut socket = self.socket.lock().await;
+    fn read_usbip_message_blocking(&self) -> Result<UsbIpMessage> {
+        let mut socket = self
+            .socket
+            .lock()
+            .map_err(|e| anyhow!("Failed to lock socket: {}", e))?;
+
+        debug!(
+            "Attempting to read from socket for device {} port {}",
+            self.devid, self.port
+        );
 
         // Read header (20 bytes)
         let mut header_buf = vec![0u8; UsbIpHeader::SIZE];
-        if let Err(e) = socket.read_exact(&mut header_buf).await {
-            error!("Failed to read header: {:#}", e);
-            return Err(anyhow::anyhow!("Failed to read USB/IP header: {}", e));
+        match socket.read_exact(&mut header_buf) {
+            Ok(()) => {
+                debug!(
+                    "Successfully read {} bytes for device {} port {}",
+                    header_buf.len(), self.devid, self.port
+                );
+            }
+            Err(e) => {
+                debug!(
+                    "Read failed for device {} port {}: kind={:?}, error={}",
+                    self.devid, self.port, e.kind(), e
+                );
+                return Err(anyhow!("Failed to read USB/IP header: {}", e));
+            }
         }
 
         debug!(
@@ -261,7 +258,6 @@ impl SocketBridge {
                 let mut cmd_buf = vec![0u8; UsbIpCmdSubmit::SIZE];
                 socket
                     .read_exact(&mut cmd_buf)
-                    .await
                     .context("Failed to read CMD_SUBMIT payload")?;
 
                 let mut cursor = std::io::Cursor::new(&cmd_buf);
@@ -273,7 +269,6 @@ impl SocketBridge {
                     data.resize(cmd.transfer_buffer_length as usize, 0);
                     socket
                         .read_exact(&mut data)
-                        .await
                         .context("Failed to read transfer data")?;
                 }
 
@@ -284,7 +279,6 @@ impl SocketBridge {
                 let mut unlink_buf = vec![0u8; UsbIpCmdUnlink::SIZE];
                 socket
                     .read_exact(&mut unlink_buf)
-                    .await
                     .context("Failed to read CMD_UNLINK payload")?;
 
                 let mut cursor = std::io::Cursor::new(&unlink_buf);
@@ -304,12 +298,12 @@ impl SocketBridge {
         }
     }
 
-    /// Handle CMD_SUBMIT by forwarding to DeviceProxy
+    /// Handle CMD_SUBMIT by forwarding to DeviceProxy (blocking version)
     ///
-    /// This method tracks the pending transfer for cancellation support via CMD_UNLINK.
-    /// A oneshot channel is used to signal cancellation from handle_cmd_unlink().
-    async fn handle_cmd_submit(
+    /// Uses the tokio runtime handle to call async DeviceProxy methods.
+    fn handle_cmd_submit_blocking(
         &self,
+        rt: &tokio::runtime::Handle,
         header: UsbIpHeader,
         cmd: UsbIpCmdSubmit,
         data: Vec<u8>,
@@ -317,10 +311,10 @@ impl SocketBridge {
         let seqnum = header.seqnum;
 
         // Create cancellation channel for this transfer
-        let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+        let (cancel_tx, _cancel_rx) = oneshot::channel::<()>();
 
         // Register this transfer as pending (for CMD_UNLINK support)
-        {
+        rt.block_on(async {
             let mut pending = self.pending_transfers.write().await;
             pending.insert(seqnum, cancel_tx);
             trace!(
@@ -328,36 +322,24 @@ impl SocketBridge {
                 seqnum,
                 pending.len()
             );
-        }
+        });
 
-        // Convert USB/IP to our protocol
-        // Note: DeviceHandle will be obtained from device_proxy
-        let usb_request = usbip_to_usb_request(&self.device_proxy, &header, &cmd, data).await?;
+        // Convert USB/IP to our protocol using tokio runtime
+        let usb_request = rt.block_on(async {
+            usbip_to_usb_request(&self.device_proxy, &header, &cmd, data).await
+        })?;
 
         trace!(
             "Submitting USB request: seqnum={}, id={}",
-            seqnum, usb_request.id.0
+            seqnum,
+            usb_request.id.0
         );
 
-        // Submit to device proxy with cancellation support
-        // Race between the actual transfer and the cancellation signal
-        let result = tokio::select! {
-            // Transfer completed (success or error)
-            transfer_result = self.device_proxy.submit_transfer(usb_request) => {
-                transfer_result
-            }
-            // Cancellation requested via CMD_UNLINK
-            _ = cancel_rx => {
-                trace!("Transfer cancelled via CMD_UNLINK: seqnum={}", seqnum);
-                // Return early - the CMD_UNLINK handler already sent RET_UNLINK
-                // Remove from pending (already removed by unlink handler, but be safe)
-                self.pending_transfers.write().await.remove(&seqnum);
-                return Ok(());
-            }
-        };
+        // Submit to device proxy (blocking on async call)
+        let result = rt.block_on(async { self.device_proxy.submit_transfer(usb_request).await });
 
-        // Remove from pending transfers (completed or errored, not cancelled)
-        {
+        // Remove from pending transfers
+        rt.block_on(async {
             let mut pending = self.pending_transfers.write().await;
             pending.remove(&seqnum);
             trace!(
@@ -365,7 +347,7 @@ impl SocketBridge {
                 seqnum,
                 pending.len()
             );
-        }
+        });
 
         // Handle transfer result
         let usb_response = result.context("Failed to submit transfer to device proxy")?;
@@ -378,20 +360,23 @@ impl SocketBridge {
             seqnum, ret.status, ret.actual_length
         );
 
-        // Send RET_SUBMIT back to vhci_hcd
-        self.send_ret_submit(&header, ret, response_data).await?;
+        // Send RET_SUBMIT back to vhci_hcd (blocking)
+        self.send_ret_submit_blocking(&header, ret, response_data)?;
 
         Ok(())
     }
 
-    /// Send RET_SUBMIT back to vhci_hcd
-    async fn send_ret_submit(
+    /// Send RET_SUBMIT back to vhci_hcd (blocking version)
+    fn send_ret_submit_blocking(
         &self,
         request_header: &UsbIpHeader,
         ret: UsbIpRetSubmit,
         data: Vec<u8>,
     ) -> Result<()> {
-        let mut socket = self.socket.lock().await;
+        let mut socket = self
+            .socket
+            .lock()
+            .map_err(|e| anyhow!("Failed to lock socket: {}", e))?;
 
         // Write header - preserve direction and ep from request
         let mut header = UsbIpHeader::new(
@@ -414,7 +399,7 @@ impl SocketBridge {
             &header_buf[..16.min(header_buf.len())]
         );
 
-        socket.write_all(&header_buf).await?;
+        socket.write_all(&header_buf)?;
 
         // Write RET_SUBMIT payload
         let mut ret_buf = Vec::new();
@@ -427,26 +412,31 @@ impl SocketBridge {
             &ret_buf[..20.min(ret_buf.len())]
         );
 
-        socket.write_all(&ret_buf).await?;
+        socket.write_all(&ret_buf)?;
 
         // Write response data if any
         if !data.is_empty() {
             debug!("Writing RET_SUBMIT data: {} bytes", data.len());
-            socket.write_all(&data).await?;
+            socket.write_all(&data)?;
         }
 
-        socket.flush().await?;
+        socket.flush()?;
 
         Ok(())
     }
 
-    /// Handle CMD_UNLINK by cancelling a pending transfer
+    /// Handle CMD_UNLINK by cancelling a pending transfer (blocking version)
     ///
     /// This method looks up the pending transfer by seqnum_unlink and cancels it
     /// if still in progress. Per USB/IP protocol:
     /// - If transfer is found and cancelled: return status 0 (success)
     /// - If transfer already completed: return status -ENOENT (-2)
-    async fn handle_cmd_unlink(&self, header: UsbIpHeader, cmd: UsbIpCmdUnlink) -> Result<()> {
+    fn handle_cmd_unlink_blocking(
+        &self,
+        rt: &tokio::runtime::Handle,
+        header: UsbIpHeader,
+        cmd: UsbIpCmdUnlink,
+    ) -> Result<()> {
         let seqnum_unlink = cmd.seqnum_unlink;
 
         trace!(
@@ -455,10 +445,10 @@ impl SocketBridge {
         );
 
         // Try to find and cancel the pending transfer
-        let cancel_tx = {
+        let cancel_tx = rt.block_on(async {
             let mut pending = self.pending_transfers.write().await;
             pending.remove(&seqnum_unlink)
-        };
+        });
 
         let status = match cancel_tx {
             Some(tx) => {
@@ -482,8 +472,8 @@ impl SocketBridge {
             }
         };
 
-        // Send RET_UNLINK response
-        self.send_ret_unlink(header.seqnum, status).await?;
+        // Send RET_UNLINK response (blocking)
+        self.send_ret_unlink_blocking(header.seqnum, status)?;
 
         trace!(
             "Sent RET_UNLINK: seqnum={}, status={}",
@@ -493,14 +483,17 @@ impl SocketBridge {
         Ok(())
     }
 
-    /// Send RET_UNLINK back to vhci_hcd
+    /// Send RET_UNLINK back to vhci_hcd (blocking version)
     ///
     /// Per USB/IP protocol, RET_UNLINK consists of:
     /// - Header (20 bytes): command=0x0004, seqnum, devid, direction=0, ep=0
     /// - Payload (4 bytes): status (i32)
     /// - Padding to match kernel struct alignment (16 bytes)
-    async fn send_ret_unlink(&self, seqnum: u32, status: i32) -> Result<()> {
-        let mut socket = self.socket.lock().await;
+    fn send_ret_unlink_blocking(&self, seqnum: u32, status: i32) -> Result<()> {
+        let mut socket = self
+            .socket
+            .lock()
+            .map_err(|e| anyhow!("Failed to lock socket: {}", e))?;
 
         // Write header (20 bytes)
         let header = UsbIpHeader::new(UsbIpCommand::RetUnlink, seqnum, self.devid);
@@ -512,7 +505,7 @@ impl SocketBridge {
             header.command, header.seqnum, header.devid
         );
 
-        socket.write_all(&header_buf).await?;
+        socket.write_all(&header_buf)?;
 
         // Write RET_UNLINK payload using the proper struct
         let ret_unlink = UsbIpRetUnlink { status };
@@ -529,13 +522,13 @@ impl SocketBridge {
             }
         );
 
-        socket.write_all(&ret_buf).await?;
+        socket.write_all(&ret_buf)?;
 
         // Padding: kernel expects same size as RET_SUBMIT payload (20 bytes total)
         // We wrote 4 bytes for status, so pad with 16 bytes
-        socket.write_all(&[0u8; 16]).await?;
+        socket.write_all(&[0u8; 16])?;
 
-        socket.flush().await?;
+        socket.flush()?;
 
         Ok(())
     }

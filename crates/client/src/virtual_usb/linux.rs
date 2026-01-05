@@ -146,12 +146,16 @@ impl LinuxVirtualUsbManager {
 
         let socket_bridge = Arc::new(socket_bridge);
 
+        // First attach to VHCI - kernel will start sending CMD_SUBMIT
         // Attach to VHCI via sysfs (pass real socket FD)
         self.attach_to_vhci(port, speed, devid, vhci_fd)
             .await
             .context("Failed to attach device to vhci_hcd")?;
 
-        // Start the socket bridge
+        // Small delay to let kernel complete attach
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        // Now start the socket bridge to handle CMD_SUBMIT
         socket_bridge.clone().start();
 
         // Create virtual device

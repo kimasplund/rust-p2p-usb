@@ -536,6 +536,7 @@ async fn test_concurrent_commands_from_cloned_bridges() {
                     let _ = response.send(vec![]);
                 }
                 Ok(UsbCommand::Shutdown) => break,
+                Ok(_) => continue,
                 Err(_) => break,
             }
         }

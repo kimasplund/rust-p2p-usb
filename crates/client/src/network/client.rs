@@ -7,6 +7,7 @@ use common::{ALPN_PROTOCOL, load_or_generate_secret_key};
 use iroh::{Endpoint, EndpointAddr, PublicKey as EndpointId};
 use protocol::{DeviceId, DeviceInfo};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info, warn};
@@ -34,6 +35,9 @@ pub struct ClientConfig {
     pub allowed_servers: HashSet<EndpointId>,
     /// ALPN protocol identifier
     pub alpn: Vec<u8>,
+    /// Path to the secret key file for stable EndpointId
+    /// If None, uses default XDG path: ~/.config/p2p-usb/secret_key
+    pub secret_key_path: Option<PathBuf>,
 }
 
 impl Default for ClientConfig {
@@ -41,6 +45,7 @@ impl Default for ClientConfig {
         Self {
             allowed_servers: HashSet::new(),
             alpn: ALPN_PROTOCOL.to_vec(),
+            secret_key_path: None,
         }
     }
 }
@@ -65,8 +70,8 @@ impl IrohClient {
         );
 
         // Load or generate persistent secret key for stable EndpointId
-        let secret_key =
-            load_or_generate_secret_key(None).context("Failed to load or generate secret key")?;
+        let secret_key = load_or_generate_secret_key(config.secret_key_path.as_deref())
+            .context("Failed to load or generate secret key")?;
 
         // Create Iroh endpoint with persistent key
         let endpoint = Endpoint::builder()

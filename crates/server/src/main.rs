@@ -58,6 +58,10 @@ struct Args {
     #[arg(short, long, value_name = "PATH")]
     config: Option<std::path::PathBuf>,
 
+    /// Save default configuration to default location and exit
+    #[arg(long)]
+    save_config: bool,
+
     /// Run as systemd service (no TUI)
     #[arg(long)]
     service: bool,
@@ -75,9 +79,18 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
+    // Handle --save-config flag early (before loading config)
+    if args.save_config {
+        let config = config::ServerConfig::default();
+        let path = config::ServerConfig::default_path();
+        config.save(&path).context("Failed to save configuration")?;
+        println!("Configuration saved to: {}", path.display());
+        return Ok(());
+    }
+
     // Load configuration first (to get log level from config if not specified)
-    let config = if let Some(path) = args.config {
-        config::ServerConfig::load(Some(path)).context("Failed to load configuration")?
+    let config = if let Some(ref path) = args.config {
+        config::ServerConfig::load(Some(path.clone())).context("Failed to load configuration")?
     } else {
         config::ServerConfig::load_or_default()
     };

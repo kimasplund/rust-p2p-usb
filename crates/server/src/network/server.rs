@@ -42,8 +42,8 @@ impl IrohServer {
         info!("Initializing Iroh P2P server...");
 
         // Load or generate persistent secret key for stable EndpointId
-        let secret_key =
-            load_or_generate_secret_key(None).context("Failed to load or generate secret key")?;
+        let secret_key = load_or_generate_secret_key(config.iroh.secret_key_path.as_deref())
+            .context("Failed to load or generate secret key")?;
 
         // Create Iroh endpoint with ALPN protocol identifier and persistent key
         let endpoint = Endpoint::builder()

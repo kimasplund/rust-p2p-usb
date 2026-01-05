@@ -5,12 +5,10 @@
 //! # Example
 //!
 //! ```
-//! use common::test_utils::{create_mock_device_info, TestTimeout};
+//! use common::test_utils::create_mock_device_info;
 //!
-//! # fn main() {
 //! let device = create_mock_device_info(1, 0x1234, 0x5678);
 //! assert_eq!(device.vendor_id, 0x1234);
-//! # }
 //! ```
 
 use protocol::{DeviceHandle, DeviceId, DeviceInfo, DeviceSpeed, RequestId};

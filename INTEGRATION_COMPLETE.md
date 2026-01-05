@@ -257,7 +257,6 @@ Protocol doc-tests: 8 passed
 All remaining warnings are for **intentional future-phase code**:
 
 - `save()` config methods - Phase 9 feature (config persistence)
-- `StreamMultiplexer` - Phase 9 optimization (stream management)
 - `ServerSession` - Phase 6 feature (TUI integration)
 - Various helper methods - Used by TUI (Phase 6)
 

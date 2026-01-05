@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn test_device_speed_variants() {
-        let speeds = vec![
+        let speeds = [
             DeviceSpeed::Low,
             DeviceSpeed::Full,
             DeviceSpeed::High,

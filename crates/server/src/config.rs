@@ -35,6 +35,10 @@ pub struct SecuritySettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IrohSettings {
     pub relay_servers: Option<Vec<String>>,
+    /// Path to the secret key file for stable EndpointId
+    /// If None, uses default XDG path: ~/.config/p2p-usb/secret_key
+    #[serde(default)]
+    pub secret_key_path: Option<PathBuf>,
 }
 
 impl Default for ServerConfig {
@@ -55,6 +59,7 @@ impl Default for ServerConfig {
             },
             iroh: IrohSettings {
                 relay_servers: None,
+                secret_key_path: None,
             },
         }
     }
@@ -122,9 +127,9 @@ impl ServerConfig {
     /// Get the default configuration file path
     pub fn default_path() -> PathBuf {
         if let Some(config_dir) = dirs::config_dir() {
-            config_dir.join("p2p-usb").join("server.toml")
+            config_dir.join("rust-p2p-usb").join("server.toml")
         } else {
-            PathBuf::from(".config/p2p-usb/server.toml")
+            PathBuf::from(".config/rust-p2p-usb/server.toml")
         }
     }
 

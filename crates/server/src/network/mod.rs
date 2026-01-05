@@ -24,7 +24,6 @@
 
 pub mod connection;
 pub mod server;
-pub mod streams;
 
 // Re-export public types
 pub use server::IrohServer;

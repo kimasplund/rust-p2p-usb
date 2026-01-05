@@ -52,6 +52,10 @@ struct Args {
     #[arg(short, long, value_name = "PATH")]
     config: Option<std::path::PathBuf>,
 
+    /// Save default configuration to default location and exit
+    #[arg(long)]
+    save_config: bool,
+
     /// Connect to specific server by node ID
     #[arg(long, value_name = "NODE_ID")]
     connect: Option<String>,
@@ -65,9 +69,18 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
+    // Handle --save-config flag early (before loading config)
+    if args.save_config {
+        let config = config::ClientConfig::default();
+        let path = config::ClientConfig::default_path();
+        config.save(&path).context("Failed to save configuration")?;
+        println!("Configuration saved to: {}", path.display());
+        return Ok(());
+    }
+
     // Load configuration first (to get log level from config if not specified)
-    let config = if let Some(path) = args.config {
-        config::ClientConfig::load(Some(path)).context("Failed to load configuration")?
+    let config = if let Some(ref path) = args.config {
+        config::ClientConfig::load(Some(path.clone())).context("Failed to load configuration")?
     } else {
         config::ClientConfig::load_or_default()
     };
@@ -132,6 +145,7 @@ async fn create_iroh_client(config: &config::ClientConfig) -> Result<IrohClient>
     let network_config = NetworkClientConfig {
         allowed_servers,
         alpn: common::ALPN_PROTOCOL.to_vec(),
+        secret_key_path: config.iroh.secret_key_path.clone(),
     };
 
     IrohClient::new(network_config).await

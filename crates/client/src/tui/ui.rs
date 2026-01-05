@@ -216,9 +216,7 @@ fn render_device_list(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     // Check if we have a selected server and its status
-    let selected_server = app.selected_server();
-
-    if selected_server.is_none() {
+    let Some(server) = app.selected_server() else {
         let paragraph = Paragraph::new("No server selected")
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center)
@@ -230,9 +228,8 @@ fn render_device_list(frame: &mut Frame, app: &App, area: Rect) {
             );
         frame.render_widget(paragraph, area);
         return;
-    }
+    };
 
-    let server = selected_server.unwrap();
     if server.status != ServerStatus::Connected {
         let paragraph = Paragraph::new("Server not connected\nPress Enter to connect")
             .style(Style::default().fg(Color::DarkGray))
@@ -247,8 +244,21 @@ fn render_device_list(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let devices = app.selected_server_devices();
-    if devices.is_none() || devices.unwrap().is_empty() {
+    let Some(devices) = app.selected_server_devices() else {
+        let paragraph = Paragraph::new("No devices available")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(border_color))
+                    .title(title),
+            );
+        frame.render_widget(paragraph, area);
+        return;
+    };
+
+    if devices.is_empty() {
         let paragraph = Paragraph::new("No devices available")
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center)
@@ -261,8 +271,6 @@ fn render_device_list(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(paragraph, area);
         return;
     }
-
-    let devices = devices.unwrap();
     let items: Vec<ListItem> = devices
         .iter()
         .map(|device| {

@@ -8,13 +8,12 @@ mod network;
 mod tui;
 mod virtual_usb;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use clap::Parser;
 use common::setup_logging;
 use iroh::PublicKey as EndpointId;
 use network::{ClientConfig as NetworkClientConfig, IrohClient};
 use std::sync::Arc;
-use tokio::signal;
 use tracing::{error, info, warn};
 use virtual_usb::VirtualUsbManager;
 
@@ -217,11 +216,11 @@ async fn connect_and_run(
         }
     }
 
-    // If auto-connect is enabled, fall back to TUI
+    // If auto-connect is enabled, launch TUI for interactive management
     if config.client.auto_connect {
-        info!("Auto-connect enabled, running in interactive mode");
-        warn!("TUI not yet implemented, staying connected in headless mode");
-        wait_for_shutdown().await?;
+        info!("Auto-connect enabled, launching TUI for interactive management");
+        // Run TUI - it handles cleanup internally
+        return tui::run(client, virtual_usb, config).await;
     } else {
         info!("Connected successfully. Use TUI mode for device management.");
     }
@@ -253,15 +252,4 @@ async fn run_tui_mode(
 
     // Run the TUI - it handles all the cleanup internally
     tui::run(client, virtual_usb, config).await
-}
-
-/// Wait for Ctrl+C signal
-async fn wait_for_shutdown() -> Result<()> {
-    match signal::ctrl_c().await {
-        Ok(()) => {
-            info!("Received Ctrl+C, shutting down...");
-            Ok(())
-        }
-        Err(e) => Err(anyhow!("Error waiting for Ctrl+C: {}", e)),
-    }
 }

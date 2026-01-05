@@ -109,6 +109,21 @@ impl DeviceManager {
             return Ok(existing_device.id());
         }
 
+        // Skip root hubs - they can't be shared via USB/IP
+        // Root hubs are VID 0x1d6b (Linux Foundation) with device class 9 (Hub)
+        if let Ok(desc) = device.device_descriptor() {
+            if desc.vendor_id() == 0x1d6b && desc.class_code() == 9 {
+                debug!(
+                    "Skipping root hub: bus={}, addr={}, vid={:#x}, pid={:#x}",
+                    bus,
+                    address,
+                    desc.vendor_id(),
+                    desc.product_id()
+                );
+                return Err(rusb::Error::NotSupported);
+            }
+        }
+
         // Assign new device ID
         let device_id = DeviceId(self.next_device_id);
         self.next_device_id += 1;

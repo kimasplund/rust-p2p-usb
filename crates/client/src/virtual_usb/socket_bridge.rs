@@ -355,6 +355,7 @@ impl SocketBridge {
         data: Vec<u8>,
     ) -> Result<()> {
         let seqnum = header.seqnum;
+        let max_data_len = cmd.transfer_buffer_length as usize;
 
         // Create cancellation channel for this transfer
         let (cancel_tx, _cancel_rx) = oneshot::channel::<()>();
@@ -399,7 +400,22 @@ impl SocketBridge {
         let usb_response = result.context("Failed to submit transfer to device proxy")?;
 
         // Convert response back to USB/IP
-        let (ret, response_data) = usb_response_to_usbip(&usb_response);
+        let (mut ret, mut response_data) = usb_response_to_usbip(&usb_response);
+
+        // IMPORTANT: Clamp response data to the kernel's requested buffer size
+        // The kernel allocates exactly transfer_buffer_length bytes for IN transfers.
+        // If we return more data than requested, we'll corrupt memory or cause protocol errors.
+        // This commonly happens with GET_CONFIG_DESCRIPTOR where kernel asks for 9 bytes
+        // (to read wTotalLength) but device returns the full descriptor.
+        if header.direction == 1 && response_data.len() > max_data_len {
+            eprintln!(
+                "[SocketBridge] Clamping response data from {} to {} bytes (kernel buffer size)",
+                response_data.len(),
+                max_data_len
+            );
+            response_data.truncate(max_data_len);
+            ret.actual_length = max_data_len as u32;
+        }
 
         trace!(
             "Completed USB request: seqnum={}, status={}, len={}",

@@ -341,13 +341,15 @@ mod tests {
         let decoded = decode_message(&bytes).unwrap();
 
         assert_eq!(msg.version, decoded.version);
-        if let MessagePayload::ListDevicesResponse { devices } = decoded.payload {
-            assert_eq!(devices.len(), 2);
-            assert_eq!(devices[0].id, DeviceId(1));
-            assert_eq!(devices[1].vendor_id, 0xabcd);
-        } else {
-            panic!("Wrong payload type");
-        }
+        let MessagePayload::ListDevicesResponse { devices } = decoded.payload else {
+            panic!(
+                "Expected ListDevicesResponse payload, got {:?}",
+                std::mem::discriminant(&decoded.payload)
+            );
+        };
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].id, DeviceId(1));
+        assert_eq!(devices[1].vendor_id, 0xabcd);
     }
 
     #[test]
@@ -396,16 +398,20 @@ mod tests {
         let bytes = encode_message(&msg).unwrap();
         let decoded = decode_message(&bytes).unwrap();
 
-        if let MessagePayload::SubmitTransfer { request } = decoded.payload {
-            if let TransferType::Bulk { data, .. } = request.transfer {
-                assert_eq!(data.len(), 4096);
-                assert_eq!(data[0], 0xAB);
-            } else {
-                panic!("Wrong transfer type");
-            }
-        } else {
-            panic!("Wrong payload type");
-        }
+        let MessagePayload::SubmitTransfer { request } = decoded.payload else {
+            panic!(
+                "Expected SubmitTransfer payload, got {:?}",
+                std::mem::discriminant(&decoded.payload)
+            );
+        };
+        let TransferType::Bulk { data, .. } = request.transfer else {
+            panic!(
+                "Expected Bulk transfer type, got {:?}",
+                std::mem::discriminant(&request.transfer)
+            );
+        };
+        assert_eq!(data.len(), 4096);
+        assert_eq!(data[0], 0xAB);
     }
 
     #[test]
@@ -451,11 +457,13 @@ mod tests {
         let framed = encode_framed(&msg).unwrap();
         let decoded = decode_framed(&framed).unwrap();
 
-        if let MessagePayload::ListDevicesResponse { devices } = decoded.payload {
-            assert_eq!(devices.len(), 100);
-        } else {
-            panic!("Wrong payload type");
-        }
+        let MessagePayload::ListDevicesResponse { devices } = decoded.payload else {
+            panic!(
+                "Expected ListDevicesResponse payload, got {:?}",
+                std::mem::discriminant(&decoded.payload)
+            );
+        };
+        assert_eq!(devices.len(), 100);
     }
 
     #[test]
@@ -463,12 +471,11 @@ mod tests {
         let incomplete = vec![0, 0, 0, 10]; // Says 10 bytes but provides none
         let result = decode_framed(&incomplete);
         assert!(result.is_err());
-        if let Err(ProtocolError::IncompleteFrame { expected, actual }) = result {
-            assert_eq!(expected, 14); // 4 + 10
-            assert_eq!(actual, 4);
-        } else {
-            panic!("Wrong error type");
-        }
+        let Err(ProtocolError::IncompleteFrame { expected, actual }) = result else {
+            panic!("Expected IncompleteFrame error, got {:?}", result);
+        };
+        assert_eq!(expected, 14); // 4 + 10
+        assert_eq!(actual, 4);
     }
 
     #[test]

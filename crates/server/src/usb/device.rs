@@ -88,7 +88,7 @@ impl UsbDevice {
             return Ok(()); // Already open
         }
 
-        let mut handle = self.device.open().map_err(|e| {
+        let handle = self.device.open().map_err(|e| {
             warn!("Failed to open device: {}", e);
             match e {
                 rusb::Error::NotFound => AttachError::DeviceNotFound,
@@ -106,7 +106,10 @@ impl UsbDevice {
         // will have claimed the interface, preventing us from accessing it
         match handle.kernel_driver_active(0) {
             Ok(true) => {
-                debug!("Detaching kernel driver from interface 0 on device {:?}", self.id);
+                debug!(
+                    "Detaching kernel driver from interface 0 on device {:?}",
+                    self.id
+                );
                 if let Err(e) = handle.detach_kernel_driver(0) {
                     warn!("Failed to detach kernel driver: {}", e);
                     return Err(AttachError::Other {
@@ -137,17 +140,31 @@ impl UsbDevice {
     }
 
     /// Close the device
+    ///
+    /// This will release the claimed interface and reattach the kernel driver
+    /// to restore the device to normal kernel control.
     pub fn close(&mut self) {
-        if let Some(mut handle) = self.handle.take() {
+        if let Some(handle) = self.handle.take() {
             // Release interface 0 before closing
             if let Err(e) = handle.release_interface(0) {
                 warn!("Failed to release interface 0: {}", e);
             }
 
-            // Optionally reattach kernel driver
-            // Note: We don't do this automatically because the device may still be
-            // in use by the client. The kernel will reattach drivers when the device
-            // is disconnected or the system is rebooted.
+            // Reattach kernel driver to restore device to kernel control
+            // This allows the device to be used normally on the server again
+            // after we're done sharing it via USB/IP
+            if let Err(e) = handle.attach_kernel_driver(0) {
+                // This may fail if no driver was attached originally, which is fine
+                debug!(
+                    "Could not reattach kernel driver (may not have been detached): {}",
+                    e
+                );
+            } else {
+                debug!(
+                    "Reattached kernel driver to interface 0 on device {:?}",
+                    self.id
+                );
+            }
 
             debug!("Closed device {:?}", self.id);
         }

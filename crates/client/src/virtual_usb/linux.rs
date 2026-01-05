@@ -53,10 +53,14 @@ pub struct LinuxVirtualUsbManager {
     socket_bridges: Arc<RwLock<HashMap<DeviceHandle, Arc<SocketBridge>>>>,
     /// VHCI device path (e.g., /sys/devices/platform/vhci_hcd.0)
     vhci_path: PathBuf,
-    /// Next high-speed port to allocate (0-7 for USB 2.0 and below)
-    next_hs_port: Arc<RwLock<u8>>,
-    /// Next super-speed port to allocate (8-15 for USB 3.0+)
-    next_ss_port: Arc<RwLock<u8>>,
+    /// Bitmap for high-speed ports (0-7 for USB 2.0 and below)
+    /// Each bit represents a port: bit 0 = port 0, bit 7 = port 7
+    /// 1 = allocated, 0 = free
+    hs_ports: Arc<RwLock<u8>>,
+    /// Bitmap for super-speed ports (8-15 for USB 3.0+)
+    /// Each bit represents a port: bit 0 = port 8, bit 7 = port 15
+    /// 1 = allocated, 0 = free
+    ss_ports: Arc<RwLock<u8>>,
 }
 
 impl LinuxVirtualUsbManager {
@@ -75,8 +79,8 @@ impl LinuxVirtualUsbManager {
             attached_devices: Arc::new(RwLock::new(HashMap::new())),
             socket_bridges: Arc::new(RwLock::new(HashMap::new())),
             vhci_path,
-            next_hs_port: Arc::new(RwLock::new(0)), // High-speed ports: 0-7
-            next_ss_port: Arc::new(RwLock::new(8)), // Super-speed ports: 8-15
+            hs_ports: Arc::new(RwLock::new(0)), // All high-speed ports free (bitmap)
+            ss_ports: Arc::new(RwLock::new(0)), // All super-speed ports free (bitmap)
         })
     }
 
@@ -231,48 +235,84 @@ impl LinuxVirtualUsbManager {
     /// vhci_hcd has separate port ranges:
     /// - Ports 0-7: High-speed (hs) for USB 2.0 and below (Low, Full, High)
     /// - Ports 8-15: Super-speed (ss) for USB 3.0+ (Super, SuperPlus)
+    ///
+    /// Uses bitmap-based allocation to find the first free port and mark it as allocated.
     async fn allocate_port(&self, speed: DeviceSpeed) -> Result<u8> {
         match speed {
             // USB 2.0 and below: use high-speed ports (0-7)
             DeviceSpeed::Low | DeviceSpeed::Full | DeviceSpeed::High => {
-                let mut next_port = self.next_hs_port.write().await;
+                let mut bitmap = self.hs_ports.write().await;
 
-                if *next_port >= 8 {
+                // Find first free bit (0) using trailing_ones
+                // trailing_ones returns the count of consecutive 1s from bit 0
+                // If all bits are 1, trailing_ones() returns 8
+                let free_bit = (*bitmap).trailing_ones() as u8;
+
+                if free_bit >= 8 {
                     return Err(anyhow!(
-                        "No available high-speed VHCI ports (maximum 8 USB 2.0 devices supported)"
+                        "No available high-speed VHCI ports (all 8 USB 2.0 ports in use, detach a device to free a port)"
                     ));
                 }
 
-                let port = *next_port;
-                *next_port += 1;
+                // Set the bit to mark port as allocated
+                *bitmap |= 1 << free_bit;
 
-                Ok(port)
+                debug!(
+                    "Allocated high-speed port {} (bitmap: {:08b})",
+                    free_bit, *bitmap
+                );
+
+                Ok(free_bit)
             }
             // USB 3.0+: use super-speed ports (8-15)
             DeviceSpeed::Super | DeviceSpeed::SuperPlus => {
-                let mut next_port = self.next_ss_port.write().await;
+                let mut bitmap = self.ss_ports.write().await;
 
-                if *next_port >= 16 {
+                // Find first free bit (0)
+                let free_bit = (*bitmap).trailing_ones() as u8;
+
+                if free_bit >= 8 {
                     return Err(anyhow!(
-                        "No available super-speed VHCI ports (maximum 8 USB 3.0+ devices supported)"
+                        "No available super-speed VHCI ports (all 8 USB 3.0+ ports in use, detach a device to free a port)"
                     ));
                 }
 
-                let port = *next_port;
-                *next_port += 1;
+                // Set the bit to mark port as allocated
+                *bitmap |= 1 << free_bit;
+
+                // Super-speed ports are offset by 8 (ports 8-15)
+                let port = free_bit + 8;
+
+                debug!(
+                    "Allocated super-speed port {} (bitmap: {:08b})",
+                    port, *bitmap
+                );
 
                 Ok(port)
             }
         }
     }
 
-    /// Free a VHCI port
-    async fn free_port(&self, _port: u8) {
-        // Note: In a production implementation, we would track which ports
-        // are in use and allow reuse. For Phase 5, we use a simple incrementing
-        // counter that doesn't reuse ports.
-        //
-        // Future enhancement: Implement a proper port allocation bitmap.
+    /// Free a VHCI port for reuse
+    ///
+    /// Clears the corresponding bit in the port bitmap based on port number.
+    /// Safe to call with already-free ports (idempotent).
+    async fn free_port(&self, port: u8) {
+        if port < 8 {
+            // High-speed port (0-7)
+            let mut bitmap = self.hs_ports.write().await;
+            *bitmap &= !(1 << port);
+            debug!("Freed high-speed port {} (bitmap: {:08b})", port, *bitmap);
+        } else if port < 16 {
+            // Super-speed port (8-15), stored as bits 0-7 in ss_ports
+            let bit = port - 8;
+            let mut bitmap = self.ss_ports.write().await;
+            *bitmap &= !(1 << bit);
+            debug!("Freed super-speed port {} (bitmap: {:08b})", port, *bitmap);
+        } else {
+            // Invalid port number - log warning but don't fail
+            debug!("Attempted to free invalid port {} (ignored)", port);
+        }
     }
 
     /// Attach a device to the VHCI controller via sysfs
@@ -391,5 +431,269 @@ mod tests {
         // Device ID is just the handle value
         let handle = DeviceHandle(0x12345678);
         assert_eq!(handle.0, 0x12345678);
+    }
+
+    /// Test helper: Create a minimal manager for port allocation tests
+    /// Uses a mock vhci_path since we only test port allocation logic
+    fn create_test_manager() -> LinuxVirtualUsbManager {
+        LinuxVirtualUsbManager {
+            attached_devices: Arc::new(RwLock::new(HashMap::new())),
+            socket_bridges: Arc::new(RwLock::new(HashMap::new())),
+            vhci_path: PathBuf::from("/sys/devices/platform/vhci_hcd.0"),
+            hs_ports: Arc::new(RwLock::new(0)),
+            ss_ports: Arc::new(RwLock::new(0)),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_allocate_all_hs_ports() {
+        let manager = create_test_manager();
+
+        // Allocate all 8 high-speed ports
+        for expected_port in 0..8u8 {
+            let port = manager.allocate_port(DeviceSpeed::High).await.unwrap();
+            assert_eq!(
+                port, expected_port,
+                "Expected port {} but got {}",
+                expected_port, port
+            );
+        }
+
+        // Verify bitmap is full
+        let bitmap = *manager.hs_ports.read().await;
+        assert_eq!(
+            bitmap, 0xFF,
+            "Expected all ports allocated (0xFF), got {:08b}",
+            bitmap
+        );
+    }
+
+    #[tokio::test]
+    async fn test_allocate_all_ss_ports() {
+        let manager = create_test_manager();
+
+        // Allocate all 8 super-speed ports (should return 8-15)
+        for expected_port in 8..16u8 {
+            let port = manager.allocate_port(DeviceSpeed::Super).await.unwrap();
+            assert_eq!(
+                port, expected_port,
+                "Expected port {} but got {}",
+                expected_port, port
+            );
+        }
+
+        // Verify bitmap is full
+        let bitmap = *manager.ss_ports.read().await;
+        assert_eq!(
+            bitmap, 0xFF,
+            "Expected all ports allocated (0xFF), got {:08b}",
+            bitmap
+        );
+    }
+
+    #[tokio::test]
+    async fn test_hs_port_exhaustion_error() {
+        let manager = create_test_manager();
+
+        // Allocate all 8 ports
+        for _ in 0..8 {
+            manager.allocate_port(DeviceSpeed::Full).await.unwrap();
+        }
+
+        // 9th allocation should fail with descriptive error
+        let result = manager.allocate_port(DeviceSpeed::Full).await;
+        assert!(result.is_err());
+
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("high-speed") && error_msg.contains("detach"),
+            "Error message should mention 'high-speed' and 'detach': {}",
+            error_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ss_port_exhaustion_error() {
+        let manager = create_test_manager();
+
+        // Allocate all 8 super-speed ports
+        for _ in 0..8 {
+            manager.allocate_port(DeviceSpeed::SuperPlus).await.unwrap();
+        }
+
+        // 9th allocation should fail with descriptive error
+        let result = manager.allocate_port(DeviceSpeed::SuperPlus).await;
+        assert!(result.is_err());
+
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("super-speed") && error_msg.contains("detach"),
+            "Error message should mention 'super-speed' and 'detach': {}",
+            error_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_free_and_reallocate_hs_port() {
+        let manager = create_test_manager();
+
+        // Allocate ports 0, 1, 2
+        let port0 = manager.allocate_port(DeviceSpeed::High).await.unwrap();
+        let port1 = manager.allocate_port(DeviceSpeed::High).await.unwrap();
+        let port2 = manager.allocate_port(DeviceSpeed::High).await.unwrap();
+
+        assert_eq!(port0, 0);
+        assert_eq!(port1, 1);
+        assert_eq!(port2, 2);
+
+        // Free port 1
+        manager.free_port(1).await;
+
+        // Next allocation should reuse port 1 (first free bit)
+        let reused_port = manager.allocate_port(DeviceSpeed::High).await.unwrap();
+        assert_eq!(
+            reused_port, 1,
+            "Should reuse freed port 1, got {}",
+            reused_port
+        );
+
+        // Next allocation should use port 3
+        let port3 = manager.allocate_port(DeviceSpeed::High).await.unwrap();
+        assert_eq!(port3, 3, "Should allocate port 3, got {}", port3);
+    }
+
+    #[tokio::test]
+    async fn test_free_and_reallocate_ss_port() {
+        let manager = create_test_manager();
+
+        // Allocate ports 8, 9, 10
+        let port8 = manager.allocate_port(DeviceSpeed::Super).await.unwrap();
+        let port9 = manager.allocate_port(DeviceSpeed::Super).await.unwrap();
+        let port10 = manager.allocate_port(DeviceSpeed::Super).await.unwrap();
+
+        assert_eq!(port8, 8);
+        assert_eq!(port9, 9);
+        assert_eq!(port10, 10);
+
+        // Free port 9
+        manager.free_port(9).await;
+
+        // Next allocation should reuse port 9
+        let reused_port = manager.allocate_port(DeviceSpeed::Super).await.unwrap();
+        assert_eq!(
+            reused_port, 9,
+            "Should reuse freed port 9, got {}",
+            reused_port
+        );
+    }
+
+    #[tokio::test]
+    async fn test_free_multiple_ports_and_reallocate() {
+        let manager = create_test_manager();
+
+        // Allocate all 8 HS ports
+        for _ in 0..8 {
+            manager.allocate_port(DeviceSpeed::High).await.unwrap();
+        }
+
+        // Free ports 3, 5, 7 (non-contiguous)
+        manager.free_port(3).await;
+        manager.free_port(5).await;
+        manager.free_port(7).await;
+
+        // Bitmap should be 0b01010111 (ports 0,1,2,4,6 = bits 0,1,2,4,6)
+        let bitmap = *manager.hs_ports.read().await;
+        assert_eq!(
+            bitmap, 0b01010111,
+            "Expected bitmap 0b01010111, got {:08b}",
+            bitmap
+        );
+
+        // Reallocate - should get 3, then 5, then 7
+        let port_a = manager.allocate_port(DeviceSpeed::High).await.unwrap();
+        let port_b = manager.allocate_port(DeviceSpeed::High).await.unwrap();
+        let port_c = manager.allocate_port(DeviceSpeed::High).await.unwrap();
+
+        assert_eq!(port_a, 3, "First realloc should be port 3");
+        assert_eq!(port_b, 5, "Second realloc should be port 5");
+        assert_eq!(port_c, 7, "Third realloc should be port 7");
+
+        // Now all ports should be allocated again
+        let result = manager.allocate_port(DeviceSpeed::High).await;
+        assert!(result.is_err(), "Should fail when all ports are allocated");
+    }
+
+    #[tokio::test]
+    async fn test_free_already_free_port_is_idempotent() {
+        let manager = create_test_manager();
+
+        // Free port 5 twice - should not panic or corrupt state
+        manager.free_port(5).await;
+        manager.free_port(5).await;
+
+        // Allocate should still get port 0 first (first free bit)
+        let port = manager.allocate_port(DeviceSpeed::High).await.unwrap();
+        assert_eq!(port, 0);
+    }
+
+    #[tokio::test]
+    async fn test_free_invalid_port_is_safe() {
+        let manager = create_test_manager();
+
+        // Free invalid port numbers - should not panic
+        manager.free_port(16).await;
+        manager.free_port(100).await;
+        manager.free_port(255).await;
+
+        // State should be unchanged
+        let hs = *manager.hs_ports.read().await;
+        let ss = *manager.ss_ports.read().await;
+        assert_eq!(hs, 0, "HS bitmap should be unchanged");
+        assert_eq!(ss, 0, "SS bitmap should be unchanged");
+    }
+
+    #[tokio::test]
+    async fn test_hs_and_ss_ports_are_independent() {
+        let manager = create_test_manager();
+
+        // Fill all HS ports
+        for _ in 0..8 {
+            manager.allocate_port(DeviceSpeed::High).await.unwrap();
+        }
+
+        // Should still be able to allocate SS ports
+        let ss_port = manager.allocate_port(DeviceSpeed::Super).await.unwrap();
+        assert_eq!(ss_port, 8, "SS allocation should work even when HS is full");
+
+        // HS should still fail
+        let hs_result = manager.allocate_port(DeviceSpeed::High).await;
+        assert!(hs_result.is_err(), "HS should fail when full");
+    }
+
+    #[tokio::test]
+    async fn test_speed_to_port_range_mapping() {
+        let manager = create_test_manager();
+
+        // Low, Full, High speeds should use HS ports (0-7)
+        let low = manager.allocate_port(DeviceSpeed::Low).await.unwrap();
+        let full = manager.allocate_port(DeviceSpeed::Full).await.unwrap();
+        let high = manager.allocate_port(DeviceSpeed::High).await.unwrap();
+
+        assert!(low < 8, "Low speed should use HS port");
+        assert!(full < 8, "Full speed should use HS port");
+        assert!(high < 8, "High speed should use HS port");
+
+        // Super, SuperPlus speeds should use SS ports (8-15)
+        let super_speed = manager.allocate_port(DeviceSpeed::Super).await.unwrap();
+        let super_plus = manager.allocate_port(DeviceSpeed::SuperPlus).await.unwrap();
+
+        assert!(
+            super_speed >= 8 && super_speed < 16,
+            "Super speed should use SS port"
+        );
+        assert!(
+            super_plus >= 8 && super_plus < 16,
+            "SuperPlus speed should use SS port"
+        );
     }
 }

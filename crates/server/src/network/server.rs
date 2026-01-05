@@ -4,7 +4,7 @@
 //! and spawns per-client connection handlers.
 
 use anyhow::{Context, Result, anyhow};
-use common::{ALPN_PROTOCOL, UsbBridge};
+use common::{ALPN_PROTOCOL, UsbBridge, load_or_generate_secret_key};
 use iroh::{Endpoint, PublicKey as EndpointId};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -41,12 +41,20 @@ impl IrohServer {
     pub async fn new(config: ServerConfig, usb_bridge: UsbBridge) -> Result<Self> {
         info!("Initializing Iroh P2P server...");
 
-        // Create Iroh endpoint with ALPN protocol identifier
+        // Load or generate persistent secret key for stable EndpointId
+        let secret_key =
+            load_or_generate_secret_key(None).context("Failed to load or generate secret key")?;
+
+        // Create Iroh endpoint with ALPN protocol identifier and persistent key
         let endpoint = Endpoint::builder()
+            .secret_key(secret_key)
             .alpns(vec![ALPN_PROTOCOL.to_vec()])
             .bind()
             .await
             .context("Failed to create Iroh endpoint")?;
+
+        // Wait for endpoint to discover its addresses before accepting connections
+        let _ = endpoint.online().await;
 
         // Parse allowed clients from config
         let allowed_clients = Self::parse_allowlist(&config.security.approved_clients)?;
@@ -132,9 +140,7 @@ impl IrohServer {
         let connection = incoming.await.context("Failed to establish connection")?;
 
         // Get remote EndpointId
-        let remote_endpoint_id = connection
-            .remote_id()
-            .context("Failed to get remote EndpointId")?;
+        let remote_endpoint_id = connection.remote_id();
 
         debug!("Connection attempt from: {}", remote_endpoint_id);
 
@@ -209,8 +215,8 @@ impl IrohServer {
     pub async fn shutdown(self) -> Result<()> {
         info!("Shutting down Iroh server...");
 
-        // Close endpoint (drops all connections)
-        drop(self.endpoint);
+        // Close endpoint properly (closes all connections gracefully)
+        self.endpoint.close().await;
 
         info!("Server shutdown complete");
         Ok(())

@@ -534,40 +534,47 @@ RUST_LOG=debug p2p-usb-server 2>&1 | tee server.log
 
 ## Roadmap
 
-### Phase 1: Core Functionality (v0.1) ✓
-- [x] USB device enumeration
-- [x] Basic Iroh client-server communication
-- [x] Simple TUI for server and client
-- [x] USB control transfers
-- [x] Bulk transfers
+### Phase 1: Core Functionality (v0.1.0) - COMPLETE
+- [x] USB device enumeration and hot-plug detection
+- [x] Iroh P2P client-server communication (iroh 0.95)
+- [x] USB control, bulk, and interrupt transfers
+- [x] EndpointId-based authentication
+- [x] Configuration file support (TOML)
+- [x] Systemd service integration
+- [x] Virtual USB via vhci_hcd (Linux)
+- [x] USB/IP protocol implementation
+- [x] Kernel driver management (detach/reattach)
 
-### Phase 2: Production Ready (v0.2)
-- [ ] Endpoint approval system
-- [ ] Configuration file support
-- [ ] Systemd service integration
+### Phase 2: User Experience (v0.2) - IN PROGRESS
+- [x] CLI argument parsing
+- [x] Comprehensive logging with tracing
+- [ ] Terminal UI (TUI) for server and client
 - [ ] Error recovery and reconnection
-- [ ] Comprehensive logging
+- [ ] Performance metrics display
+- [ ] Device filtering by VID/PID
 
 ### Phase 3: Enhanced Features (v0.3)
-- [ ] Interrupt transfers
 - [ ] Isochronous transfers (for audio/video devices)
-- [ ] Device filtering by VID/PID
-- [ ] Performance metrics and monitoring
 - [ ] QR code for easy server connection
+- [ ] Connection health monitoring
+- [ ] Bandwidth usage statistics
+- [ ] Hot-plug notification to clients
 
 ### Phase 4: Advanced Features (v1.0)
 - [ ] Multi-client support (device sharing)
 - [ ] Device passthrough policies (time-based access)
 - [ ] Bandwidth limiting and QoS
-- [ ] Web-based management interface
-- [ ] Mobile client support
+- [ ] macOS client support
+- [ ] Windows client support
 
 ### Future Considerations
-- [ ] USB 3.0 optimization
-- [ ] Windows server support
-- [ ] MacOS virtual device driver
+- [ ] USB 3.0 SuperSpeed optimization
+- [ ] Web-based management interface
+- [ ] Mobile client support
 - [ ] Encrypted device storage (for security keys)
 - [ ] Audit logging and compliance features
+
+See [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) for detailed progress and [docs/CHANGELOG.md](docs/CHANGELOG.md) for version history.
 
 ## Contributing
 

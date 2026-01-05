@@ -14,7 +14,7 @@ use clap::Parser;
 use common::{UsbBridge, UsbCommand, create_usb_bridge, setup_logging};
 use network::IrohServer;
 use tokio::signal;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use usb::spawn_usb_worker;
 
 #[derive(Parser, Debug)]
@@ -239,11 +239,36 @@ async fn run_service(config: config::ServerConfig, usb_bridge: UsbBridge) -> Res
 
 /// Run in TUI mode (interactive terminal UI)
 async fn run_tui(config: config::ServerConfig, usb_bridge: UsbBridge) -> Result<()> {
-    warn!("TUI mode not yet implemented (Phase 6)");
-    warn!("Falling back to service mode...");
+    // Initialize Iroh server
+    let server = IrohServer::new(config.clone(), usb_bridge.clone())
+        .await
+        .context("Failed to initialize Iroh server")?;
 
-    // For now, fall back to service mode
-    run_service(config, usb_bridge).await
+    let endpoint_id = server.endpoint_id();
+    info!("Server EndpointId: {}", endpoint_id);
+    info!("Listening on: {:?}", server.local_addrs());
+
+    // Create channel for network events to TUI
+    // Note: network_tx will be used by the server to send events when network layer is integrated
+    let (_network_tx, network_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    // Spawn server task in background
+    // Note: In a full implementation, the server would send NetworkEvents through network_tx
+    // when clients connect/disconnect and attach/detach from devices.
+    // For now, the channel exists but won't receive events until the network layer is integrated.
+    let _server_handle = tokio::spawn(async move {
+        if let Err(e) = server.run().await {
+            error!("Server error: {:#}", e);
+        }
+    });
+
+    // Run the TUI (this blocks until user quits)
+    let tui_result = tui::run(endpoint_id, usb_bridge, network_rx, config.usb.auto_share).await;
+
+    // Note: Server task will be cleaned up when we return (dropped)
+    // The Iroh endpoint's Drop implementation will close connections gracefully
+
+    tui_result
 }
 
 /// Shutdown USB worker thread gracefully

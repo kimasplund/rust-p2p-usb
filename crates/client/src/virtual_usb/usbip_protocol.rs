@@ -49,6 +49,24 @@ impl UsbIpCommand {
     }
 }
 
+/// Parsed USB/IP message from vhci_hcd
+///
+/// Represents either a CMD_SUBMIT or CMD_UNLINK message with its header and payload
+#[derive(Debug)]
+pub enum UsbIpMessage {
+    /// USB transfer submission request
+    Submit {
+        header: UsbIpHeader,
+        cmd: UsbIpCmdSubmit,
+        data: Vec<u8>,
+    },
+    /// USB transfer cancellation request
+    Unlink {
+        header: UsbIpHeader,
+        cmd: UsbIpCmdUnlink,
+    },
+}
+
 /// USB/IP common header (48 bytes)
 ///
 /// This header precedes all USB/IP messages
@@ -67,8 +85,9 @@ pub struct UsbIpHeader {
 }
 
 impl UsbIpHeader {
-    /// Size of the header in bytes
-    pub const SIZE: usize = 48;
+    /// Size of the basic header in bytes (without payload)
+    /// This is just the 5 u32 fields: command, seqnum, devid, direction, ep
+    pub const SIZE: usize = 20;
 
     /// Create a new header
     pub fn new(command: UsbIpCommand, seqnum: u32, devid: u32) -> Self {
@@ -82,6 +101,7 @@ impl UsbIpHeader {
     }
 
     /// Read header from a reader
+    /// This reads only the basic header (20 bytes), NOT including payload
     pub fn read_from<R: Read>(reader: &mut R) -> Result<Self> {
         let command = reader.read_u32::<BigEndian>()?;
         let seqnum = reader.read_u32::<BigEndian>()?;
@@ -89,10 +109,7 @@ impl UsbIpHeader {
         let direction = reader.read_u32::<BigEndian>()?;
         let ep = reader.read_u32::<BigEndian>()?;
 
-        // Read and skip padding (28 bytes) to make header exactly 48 bytes
-        // Header fields: 4+4+4+4+4 = 20 bytes, so padding = 48-20 = 28 bytes
-        let mut padding = [0u8; 28];
-        reader.read_exact(&mut padding)?;
+        // NO padding - header is exactly 20 bytes (matches kernel's usbip_header_basic)
 
         Ok(Self {
             command,
@@ -104,6 +121,7 @@ impl UsbIpHeader {
     }
 
     /// Write header to a writer
+    /// This writes only the basic header (20 bytes), NOT including payload
     pub fn write_to<W: Write>(&self, writer: &mut W) -> Result<()> {
         writer.write_u32::<BigEndian>(self.command)?;
         writer.write_u32::<BigEndian>(self.seqnum)?;
@@ -111,8 +129,7 @@ impl UsbIpHeader {
         writer.write_u32::<BigEndian>(self.direction)?;
         writer.write_u32::<BigEndian>(self.ep)?;
 
-        // Write padding (28 bytes) to make header exactly 48 bytes
-        writer.write_all(&[0u8; 28])?;
+        // NO padding - header is exactly 20 bytes (matches kernel's usbip_header_basic)
 
         Ok(())
     }
@@ -143,10 +160,12 @@ pub struct UsbIpCmdSubmit {
 }
 
 impl UsbIpCmdSubmit {
-    /// Size of CMD_SUBMIT payload in bytes (excluding header and data)
-    pub const SIZE: usize = 40;
+    /// Size of CMD_SUBMIT payload in bytes (28 bytes: 5 x u32 + 8-byte setup)
+    /// Linux kernel struct is __packed, so no padding after setup[8]
+    /// Combined with UsbIpHeader (20 bytes), total message is 48 bytes
+    pub const SIZE: usize = 28;
 
-    /// Read CMD_SUBMIT from a reader
+    /// Read CMD_SUBMIT from a reader (28 bytes total)
     pub fn read_from<R: Read>(reader: &mut R) -> Result<Self> {
         let transfer_flags = reader.read_u32::<BigEndian>()?;
         let transfer_buffer_length = reader.read_u32::<BigEndian>()?;
@@ -157,9 +176,7 @@ impl UsbIpCmdSubmit {
         let mut setup = [0u8; 8];
         reader.read_exact(&mut setup)?;
 
-        // Skip padding (8 bytes)
-        let mut padding = [0u8; 8];
-        reader.read_exact(&mut padding)?;
+        // NO padding - kernel struct is __packed (28 bytes total)
 
         Ok(Self {
             transfer_flags,
@@ -171,7 +188,7 @@ impl UsbIpCmdSubmit {
         })
     }
 
-    /// Write CMD_SUBMIT to a writer
+    /// Write CMD_SUBMIT to a writer (28 bytes total)
     pub fn write_to<W: Write>(&self, writer: &mut W) -> Result<()> {
         writer.write_u32::<BigEndian>(self.transfer_flags)?;
         writer.write_u32::<BigEndian>(self.transfer_buffer_length)?;
@@ -180,8 +197,7 @@ impl UsbIpCmdSubmit {
         writer.write_u32::<BigEndian>(self.interval)?;
         writer.write_all(&self.setup)?;
 
-        // Write padding (8 bytes)
-        writer.write_all(&[0u8; 8])?;
+        // NO padding - kernel struct is __packed (28 bytes total)
 
         Ok(())
     }
@@ -205,8 +221,9 @@ pub struct UsbIpRetSubmit {
 }
 
 impl UsbIpRetSubmit {
-    /// Size of RET_SUBMIT payload in bytes (excluding header and data)
-    pub const SIZE: usize = 48;
+    /// Size of RET_SUBMIT payload in bytes (20 bytes: 5 x i32)
+    /// Combined with UsbIpHeader (20 bytes), total message is 40 bytes
+    pub const SIZE: usize = 20;
 
     /// Create a successful return
     pub fn success(actual_length: u32) -> Self {
@@ -230,17 +247,72 @@ impl UsbIpRetSubmit {
         }
     }
 
-    /// Write RET_SUBMIT to a writer
+    /// Write RET_SUBMIT to a writer (20 bytes: 5 x i32)
+    /// Note: All fields should be i32 according to kernel, but we use u32 for some.
+    /// This doesn't matter for serialization as we write them as raw bytes.
     pub fn write_to<W: Write>(&self, writer: &mut W) -> Result<()> {
         writer.write_i32::<BigEndian>(self.status)?;
-        writer.write_u32::<BigEndian>(self.actual_length)?;
-        writer.write_u32::<BigEndian>(self.start_frame)?;
-        writer.write_u32::<BigEndian>(self.number_of_packets)?;
-        writer.write_u32::<BigEndian>(self.error_count)?;
+        writer.write_i32::<BigEndian>(self.actual_length as i32)?; // Cast to i32 for kernel
+        writer.write_i32::<BigEndian>(self.start_frame as i32)?; // Cast to i32 for kernel
+        writer.write_i32::<BigEndian>(self.number_of_packets as i32)?; // Cast to i32 for kernel
+        writer.write_i32::<BigEndian>(self.error_count as i32)?; // Cast to i32 for kernel
 
-        // Write padding (28 bytes) to make payload 48 bytes
-        writer.write_all(&[0u8; 28])?;
+        // NO padding - payload is exactly 20 bytes (matches kernel's usbip_header_ret_submit)
 
+        Ok(())
+    }
+}
+
+/// USB/IP CMD_UNLINK payload
+///
+/// Sent by vhci_hcd to cancel a pending USB request
+#[derive(Debug, Clone)]
+pub struct UsbIpCmdUnlink {
+    /// Sequence number of the request to unlink/cancel
+    pub seqnum_unlink: u32,
+}
+
+impl UsbIpCmdUnlink {
+    /// Size of CMD_UNLINK payload in bytes (4 bytes for seqnum_unlink)
+    /// Note: The kernel struct has padding, but we only need the first 4 bytes
+    pub const SIZE: usize = 4;
+
+    /// Read CMD_UNLINK from a reader
+    pub fn read_from<R: Read>(reader: &mut R) -> Result<Self> {
+        let seqnum_unlink = reader.read_u32::<BigEndian>()?;
+        Ok(Self { seqnum_unlink })
+    }
+}
+
+/// USB/IP RET_UNLINK payload
+///
+/// Response sent back to vhci_hcd after processing an unlink request
+#[derive(Debug, Clone)]
+pub struct UsbIpRetUnlink {
+    /// Status code: 0 = success (cancelled), -ENOENT = not found (already completed)
+    pub status: i32,
+}
+
+impl UsbIpRetUnlink {
+    /// Size of RET_UNLINK payload in bytes (4 bytes for status)
+    #[allow(dead_code)]
+    pub const SIZE: usize = 4;
+
+    /// Create a successful unlink response (request was cancelled)
+    #[allow(dead_code)]
+    pub fn success() -> Self {
+        Self { status: 0 }
+    }
+
+    /// Create a not-found response (request already completed)
+    #[allow(dead_code)]
+    pub fn not_found() -> Self {
+        Self { status: -2 } // -ENOENT
+    }
+
+    /// Write RET_UNLINK to a writer
+    pub fn write_to<W: Write>(&self, writer: &mut W) -> Result<()> {
+        writer.write_i32::<BigEndian>(self.status)?;
         Ok(())
     }
 }
@@ -395,6 +467,118 @@ mod tests {
 
         assert_eq!(ret.status, -110);
         assert_eq!(ret.actual_length, 0);
+    }
+
+    #[test]
+    fn test_ret_submit_serialization_success() {
+        // Test successful RET_SUBMIT with 18 bytes of data transferred
+        let ret = UsbIpRetSubmit::success(18);
+
+        let mut buf = Vec::new();
+        ret.write_to(&mut buf).unwrap();
+
+        // Verify exact size matches kernel struct (5 x i32 = 20 bytes, __packed)
+        assert_eq!(buf.len(), 20);
+        assert_eq!(buf.len(), UsbIpRetSubmit::SIZE);
+
+        // Verify wire format (big-endian)
+        // status = 0
+        assert_eq!(&buf[0..4], &[0x00, 0x00, 0x00, 0x00]);
+        // actual_length = 18 (0x12)
+        assert_eq!(&buf[4..8], &[0x00, 0x00, 0x00, 0x12]);
+        // start_frame = 0
+        assert_eq!(&buf[8..12], &[0x00, 0x00, 0x00, 0x00]);
+        // number_of_packets = 0
+        assert_eq!(&buf[12..16], &[0x00, 0x00, 0x00, 0x00]);
+        // error_count = 0
+        assert_eq!(&buf[16..20], &[0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_ret_submit_serialization_error() {
+        // Test error RET_SUBMIT with ETIMEDOUT (-110)
+        let ret = UsbIpRetSubmit::error(-110);
+
+        let mut buf = Vec::new();
+        ret.write_to(&mut buf).unwrap();
+
+        assert_eq!(buf.len(), UsbIpRetSubmit::SIZE);
+
+        // Verify status is -110 in big-endian two's complement
+        // -110 = 0xFFFFFF92
+        assert_eq!(&buf[0..4], &[0xFF, 0xFF, 0xFF, 0x92]);
+        // actual_length = 0
+        assert_eq!(&buf[4..8], &[0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_ret_submit_serialization_large_transfer() {
+        // Test with larger transfer size (64KB - common for bulk transfers)
+        let ret = UsbIpRetSubmit::success(65536);
+
+        let mut buf = Vec::new();
+        ret.write_to(&mut buf).unwrap();
+
+        assert_eq!(buf.len(), UsbIpRetSubmit::SIZE);
+
+        // actual_length = 65536 (0x00010000)
+        assert_eq!(&buf[4..8], &[0x00, 0x01, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_full_message_size() {
+        // Verify total message sizes match USB/IP protocol spec
+        // CMD_SUBMIT: header (20) + payload (28) = 48 bytes
+        assert_eq!(UsbIpHeader::SIZE + UsbIpCmdSubmit::SIZE, 48);
+
+        // RET_SUBMIT: header (20) + payload (20) = 40 bytes
+        assert_eq!(UsbIpHeader::SIZE + UsbIpRetSubmit::SIZE, 40);
+    }
+
+    #[test]
+    fn test_cmd_unlink_read() {
+        // Test reading CMD_UNLINK payload
+        // seqnum_unlink = 42 (0x0000002A) in big-endian
+        let data = [0x00, 0x00, 0x00, 0x2A];
+        let mut cursor = Cursor::new(&data);
+        let cmd = UsbIpCmdUnlink::read_from(&mut cursor).unwrap();
+
+        assert_eq!(cmd.seqnum_unlink, 42);
+    }
+
+    #[test]
+    fn test_ret_unlink_success() {
+        // Test RET_UNLINK with success status (cancelled)
+        let ret = UsbIpRetUnlink::success();
+
+        let mut buf = Vec::new();
+        ret.write_to(&mut buf).unwrap();
+
+        assert_eq!(buf.len(), 4);
+        assert_eq!(ret.status, 0);
+        // Verify wire format: status = 0 in big-endian
+        assert_eq!(&buf[..], &[0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_ret_unlink_not_found() {
+        // Test RET_UNLINK with not-found status (already completed)
+        let ret = UsbIpRetUnlink::not_found();
+
+        let mut buf = Vec::new();
+        ret.write_to(&mut buf).unwrap();
+
+        assert_eq!(buf.len(), 4);
+        assert_eq!(ret.status, -2); // -ENOENT
+        // Verify wire format: -2 = 0xFFFFFFFE in big-endian
+        assert_eq!(&buf[..], &[0xFF, 0xFF, 0xFF, 0xFE]);
+    }
+
+    #[test]
+    fn test_cmd_unlink_message_size() {
+        // Verify CMD_UNLINK message sizes
+        // CMD_UNLINK: header (20) + payload (4) = 24 bytes
+        assert_eq!(UsbIpHeader::SIZE + UsbIpCmdUnlink::SIZE, 24);
     }
 }
 

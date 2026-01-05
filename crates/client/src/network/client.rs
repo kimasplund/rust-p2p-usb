@@ -3,7 +3,7 @@
 //! Connects to remote servers and manages connections using Iroh P2P networking.
 
 use anyhow::{Context, Result, anyhow};
-use common::ALPN_PROTOCOL;
+use common::{ALPN_PROTOCOL, load_or_generate_secret_key};
 use iroh::{Endpoint, EndpointAddr, PublicKey as EndpointId};
 use protocol::{DeviceId, DeviceInfo};
 use std::collections::{HashMap, HashSet};
@@ -64,15 +64,26 @@ impl IrohClient {
             String::from_utf8_lossy(&config.alpn)
         );
 
-        // Create Iroh endpoint
+        // Load or generate persistent secret key for stable EndpointId
+        let secret_key =
+            load_or_generate_secret_key(None).context("Failed to load or generate secret key")?;
+
+        // Create Iroh endpoint with persistent key
         let endpoint = Endpoint::builder()
+            .secret_key(secret_key)
             .alpns(vec![config.alpn.clone()])
             .bind()
             .await
             .context("Failed to create Iroh endpoint")?;
 
+        // Wait for endpoint to discover its addresses before accepting connections
+        let _ = endpoint.online().await;
+
         let endpoint_id = endpoint.id();
-        info!("Client EndpointId: {}", endpoint_id);
+        info!(
+            "Client EndpointId: {} (stable across restarts)",
+            endpoint_id
+        );
 
         Ok(Self {
             endpoint,

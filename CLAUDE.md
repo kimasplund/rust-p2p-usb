@@ -265,6 +265,37 @@ When working on this project:
 
 ---
 
-**Last Updated**: 2025-10-31
+## Current Implementation Status
+
+**Project Stage**: Alpha (v0.1.0)
+**Overall Completion**: ~75%
+
+### What's Working
+- Iroh 0.95 P2P networking with EndpointId authentication
+- USB device enumeration and management (server)
+- USB/IP virtual device creation via vhci_hcd (Linux client)
+- Control, Bulk, and Interrupt transfers
+- Configuration files and CLI
+- Systemd service mode
+
+### Not Yet Implemented
+- TUI (scaffolding only, Phase 6)
+- Isochronous transfers (deferred to v0.2)
+- macOS/Windows client (stubs only)
+- Performance benchmarking suite
+
+### Key Recent Changes (January 2025)
+- Upgraded from iroh 0.28 to iroh 0.95
+- Added `endpoint.online()` for connection readiness
+- Implemented USB/IP import protocol handshake
+- Added CMD_UNLINK support for transfer cancellation
+- Fixed USB speed codes and port allocation for USB 3.0+
+- Added kernel driver detachment/reattachment
+
+See `/docs/PROJECT_STATUS.md` for detailed status and `/docs/CHANGELOG.md` for change history.
+
+---
+
+**Last Updated**: 2026-01-05
 **Initialized by**: init-workspace-v2
-**Project Stage**: Prototype (v0.1 in development)
+**Project Stage**: Alpha (v0.1.0)

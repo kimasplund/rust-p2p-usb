@@ -179,12 +179,6 @@ async fn connect_and_run(
                         device.product.as_deref().unwrap_or("Unknown Product")
                     );
 
-                    // TEMPORARY: Only attach Kingston DataTraveler (0951:1666) for testing
-                    if device.vendor_id != 0x0951 || device.product_id != 0x1666 {
-                        info!("  → Skipping (focusing on Kingston 8GB stick only)");
-                        continue;
-                    }
-
                     // Create device proxy and attach as virtual USB device
                     match IrohClient::create_device_proxy(client.clone(), server_id, device.clone())
                         .await
@@ -241,73 +235,10 @@ async fn run_tui_mode(
     virtual_usb: Arc<VirtualUsbManager>,
     config: &config::ClientConfig,
 ) -> Result<()> {
-    warn!("TUI mode not yet implemented (Phase 6)");
-    warn!("Falling back to headless mode...");
+    info!("Starting TUI mode");
 
-    // Auto-connect to approved servers if enabled
-    if config.client.auto_connect && !config.servers.approved_servers.is_empty() {
-        info!("Auto-connecting to approved servers...");
-
-        for server_str in &config.servers.approved_servers {
-            if let Ok(server_id) = server_str.parse::<EndpointId>() {
-                info!("Connecting to server: {}", server_id);
-                match client.connect_to_server(server_id, None).await {
-                    Ok(()) => {
-                        info!("Successfully connected to {}", server_id);
-
-                        // List devices and attach them as virtual USB
-                        if let Ok(devices) = client.list_remote_devices(server_id).await {
-                            info!("  {} device(s) available", devices.len());
-
-                            for device in devices {
-                                if let Ok(device_proxy) = IrohClient::create_device_proxy(
-                                    client.clone(),
-                                    server_id,
-                                    device.clone(),
-                                )
-                                .await
-                                    && let Ok(handle) =
-                                        virtual_usb.attach_device(device_proxy).await
-                                {
-                                    info!(
-                                        "  ✓ Attached device {:04x}:{:04x} as virtual USB (handle: {})",
-                                        device.vendor_id, device.product_id, handle.0
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Failed to connect to {}: {:#}", server_id, e);
-                    }
-                }
-            }
-        }
-    }
-
-    // Wait for Ctrl+C
-    info!("Client running. Press Ctrl+C to shutdown.");
-    wait_for_shutdown().await?;
-
-    // Cleanup: detach all virtual USB devices
-    info!("Detaching virtual USB devices...");
-    let attached_devices = virtual_usb.list_devices().await;
-    for device_handle in attached_devices {
-        if let Err(e) = virtual_usb.detach_device(device_handle).await {
-            warn!("Failed to detach device {}: {:#}", device_handle.0, e);
-        }
-    }
-
-    // Disconnect from all servers
-    let connected_servers = client.connected_servers().await;
-    for server_id in connected_servers {
-        info!("Disconnecting from {}", server_id);
-        if let Err(e) = client.disconnect_from_server(server_id).await {
-            error!("Error disconnecting: {:#}", e);
-        }
-    }
-
-    Ok(())
+    // Run the TUI - it handles all the cleanup internally
+    tui::run(client, virtual_usb, config).await
 }
 
 /// Wait for Ctrl+C signal

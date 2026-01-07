@@ -540,6 +540,19 @@ impl IrohClient {
         let connection =
             ServerConnection::new(self.endpoint.clone(), server_id, server_addr).await?;
 
+        // Exchange capabilities with server (required for push notifications)
+        match connection.send_client_capabilities().await {
+            Ok(will_send_notifications) => {
+                info!(
+                    "Capability exchange complete: server will_send_notifications={}",
+                    will_send_notifications
+                );
+            }
+            Err(e) => {
+                warn!("Capability exchange failed: {:#}, continuing without push notifications", e);
+            }
+        }
+
         // Setup notification forwarding
         let notification_tx_agg = self.notification_updates.clone();
         let mut notification_rx = connection.subscribe_notifications();

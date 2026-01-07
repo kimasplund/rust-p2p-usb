@@ -1,6 +1,6 @@
 [Unit]
 Description=P2P USB Server - Share USB devices over the internet
-Documentation=https://github.com/yourusername/rust-p2p-usb
+Documentation=https://github.com/kimasplund/rust-p2p-usb
 After=network-online.target
 Wants=network-online.target
 

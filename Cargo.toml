@@ -13,7 +13,7 @@ edition = "2024"
 rust-version = "1.90"
 authors = ["rust-p2p-usb contributors"]
 license = "MIT"
-repository = "https://github.com/yourusername/rust-p2p-usb"
+repository = "https://github.com/kimasplund/rust-p2p-usb"
 
 [workspace.dependencies]
 # Protocol and serialization

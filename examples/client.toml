@@ -85,4 +85,4 @@ approved_servers = [
 # 5. Use firewall rules to restrict network access
 #
 # For more information, see:
-# https://github.com/yourusername/rust-p2p-usb/docs/SECURITY.md
+# https://github.com/kimasplund/rust-p2p-usb/docs/SECURITY.md

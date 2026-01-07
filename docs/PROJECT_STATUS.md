@@ -22,7 +22,7 @@ rust-p2p-usb is a high-performance Rust application for secure peer-to-peer USB 
 | Phase 3 | Network Layer (Server) | Complete | 95% |
 | Phase 4 | Network Layer (Client) | Complete | 95% |
 | Phase 5 | Virtual USB (Client) | Complete | 90% |
-| Phase 6 | TUI (Server & Client) | Partial | 30% |
+| Phase 6 | TUI (Server & Client) | Complete | 90% |
 | Phase 7 | Configuration & CLI | Complete | 95% |
 | Phase 8 | Systemd Integration | Complete | 90% |
 | Phase 9 | Integration Testing | In Progress | 40% |
@@ -99,9 +99,7 @@ rust-p2p-usb is a high-performance Rust application for secure peer-to-peer USB 
 
 ### Medium Priority Issues
 
-2. **TUI Not Implemented**
-   - **Status**: Scaffolding exists, but no functional UI
-   - **Workaround**: Use `--service` mode (headless)
+
 
 3. **Isochronous Transfers Not Supported**
    - **Affected devices**: Webcams, audio devices
@@ -204,7 +202,7 @@ rust-p2p-usb/
 
 ### Short Term (v0.2.0)
 
-1. [ ] Implement TUI for server and client
+1. [ ] Polish TUI UX and add help screens
 2. [ ] Add interrupt transfer support
 3. [ ] Performance benchmarking
 4. [ ] Reconnection logic with backoff

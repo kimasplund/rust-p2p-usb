@@ -26,9 +26,9 @@ pub struct UsbWorkerThread {
 
 impl UsbWorkerThread {
     /// Create a new USB worker thread
-    pub fn new(worker: UsbWorker) -> Result<Self, rusb::Error> {
+    pub fn new(worker: UsbWorker, allowed_filters: Vec<String>) -> Result<Self, rusb::Error> {
         // Create device manager with event sender
-        let mut manager = DeviceManager::new(worker.event_tx.clone())?;
+        let mut manager = DeviceManager::new(worker.event_tx.clone(), allowed_filters)?;
 
         // Initialize device enumeration and hot-plug
         manager.initialize()?;
@@ -77,6 +77,9 @@ impl UsbWorkerThread {
                 Err(e) => {
                     warn!("Error handling USB events: {}", e);
                     // Continue despite error - don't crash the thread
+                    // For serious errors like NoDevice, we might want to shut down,
+                    // but for event handling transient errors, it's safer to retry
+                    std::thread::sleep(Duration::from_millis(100));
                 }
             }
         }
@@ -180,11 +183,14 @@ impl UsbWorkerThread {
 ///
 /// This creates a new OS thread for USB operations and returns a join handle.
 /// The thread will run until a Shutdown command is received or an error occurs.
-pub fn spawn_usb_worker(worker: UsbWorker) -> std::thread::JoinHandle<Result<(), rusb::Error>> {
+pub fn spawn_usb_worker(
+    worker: UsbWorker,
+    filters: Vec<String>,
+) -> std::thread::JoinHandle<Result<(), rusb::Error>> {
     std::thread::Builder::new()
         .name("usb-worker".to_string())
         .spawn(move || {
-            let worker_thread = UsbWorkerThread::new(worker)?;
+            let worker_thread = UsbWorkerThread::new(worker, filters)?;
             worker_thread.run()
         })
         .expect("Failed to spawn USB worker thread")
@@ -200,7 +206,7 @@ mod tests {
         let (_bridge, worker) = create_usb_bridge();
 
         // Try to create worker thread (may fail if no USB access)
-        let result = UsbWorkerThread::new(worker);
+        let result = UsbWorkerThread::new(worker, vec![]);
 
         // We don't assert success because USB context creation may fail without permissions
         // Just verify we can attempt to create it

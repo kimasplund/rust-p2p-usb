@@ -45,7 +45,7 @@ CONFIGURATION:
     3. /etc/p2p-usb/client.toml
     4. Built-in defaults
 
-For more information, visit: https://github.com/yourusername/rust-p2p-usb
+For more information, visit: https://github.com/kimasplund/rust-p2p-usb
 ")]
 struct Args {
     /// Path to configuration file

@@ -51,7 +51,7 @@ CONFIGURATION:
     3. /etc/p2p-usb/server.toml
     4. Built-in defaults
 
-For more information, visit: https://github.com/yourusername/rust-p2p-usb
+For more information, visit: https://github.com/kimasplund/rust-p2p-usb
 ")]
 struct Args {
     /// Path to configuration file
@@ -108,8 +108,10 @@ async fn main() -> Result<()> {
     info!("Log level: {}", log_level);
 
     // Initialize USB subsystem
-    let (usb_bridge, usb_worker) = create_usb_bridge();
-    let usb_worker_handle = spawn_usb_worker(usb_worker);
+    let (usb_bridge, worker) = create_usb_bridge();
+    // Start USB worker thread (hybrid architecture: sync USB ops in dedicated thread)
+    // Pass configured filters to restrict which devices are shared
+    let usb_worker_handle = spawn_usb_worker(worker, config.usb.filters.clone());
 
     if args.list_devices {
         let result = list_devices_mode(usb_bridge.clone()).await;

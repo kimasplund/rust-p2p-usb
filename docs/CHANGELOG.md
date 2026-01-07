@@ -164,7 +164,7 @@ If you were using development builds before v0.1.0:
 
 ## Links
 
-- [Repository](https://github.com/yourusername/rust-p2p-usb)
+- [Repository](https://github.com/kimasplund/rust-p2p-usb)
 - [Documentation](./docs/)
 - [Architecture](./docs/ARCHITECTURE.md)
 - [Roadmap](./docs/IMPLEMENTATION_ROADMAP.md)

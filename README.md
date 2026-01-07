@@ -2,6 +2,10 @@
 
 **Secure peer-to-peer USB device sharing over the internet using Iroh**
 
+> [!WARNING]
+> **ALPHA SOFTWARE (v0.1.0-dev)**: This software is currently in active development. It is functional for testing but not yet ready for production use. The Client currently only supports **Linux**.
+
+
 A high-performance Rust application that enables secure USB device sharing between machines anywhere on the internet. Built with Iroh for NAT traversal and P2P connectivity, this tool lets you access USB devices connected to a remote server (like a Raspberry Pi) from your laptop as if they were plugged in locally.
 
 ## Features
@@ -19,7 +23,7 @@ A high-performance Rust application that enables secure USB device sharing betwe
 ### Client
 - **Remote device access** - Connect to USB devices over the internet
 - **Terminal UI** - Manage multiple server connections and remote devices
-- **Auto-reconnection** - Resilient connection handling with automatic retry
+- **Auto-reconnection** - Basic reconnection handling
 - **Approved servers** - Whitelist of trusted server node IDs
 - **Device filtering** - Show only relevant devices based on VID/PID
 - **Performance metrics** - Monitor latency and throughput in real-time
@@ -28,7 +32,7 @@ A high-performance Rust application that enables secure USB device sharing betwe
 - **Iroh networking** - Built on Iroh for reliable P2P connectivity with NAT traversal
 - **Zero-configuration** - No port forwarding or VPN setup required
 - **End-to-end encryption** - All traffic encrypted via Iroh's built-in security
-- **Cross-platform** - Works on Linux, macOS, and Windows (Linux primary target)
+- **Linux-first** - Optimized for Linux (Client currently Linux-only)
 - **High performance** - Optimized data paths with zero-copy where possible
 - **Rust 2024 edition** - Leveraging the latest Rust language features
 
@@ -101,10 +105,10 @@ A high-performance Rust application that enables secure USB device sharing betwe
 - libusb 1.0+
 - Root privileges for USB access (or udev rules)
 
-**Client (Linux, macOS, Windows):**
+**Client (Linux):**
 - Rust 1.90+ (edition 2024 support)
-- libusb 1.0+ (Linux/macOS)
-- For Linux: USB/IP kernel modules or VHCI support
+- libusb 1.0+
+- USB/IP kernel modules (`vhci-hcd`)
 
 ### Dependencies
 
@@ -124,7 +128,7 @@ The project uses the following key crates:
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/rust-p2p-usb.git
+git clone https://github.com/kimasplund/rust-p2p-usb.git
 cd rust-p2p-usb
 
 # Build release binaries
@@ -236,14 +240,15 @@ approved_servers = [
 
 **Interactive Mode:**
 ```bash
-# Run with TUI
+# Run server
 p2p-usb-server
 
-# Run with custom config
-p2p-usb-server --config /path/to/config.toml
-
-# List devices without starting server
+# List devices
 p2p-usb-server --list-devices
+
+
+# Run with debug logging
+RUST_LOG=info p2p-usb-server
 ```
 
 **TUI Keybindings:**
@@ -287,9 +292,6 @@ sudo systemctl status p2p-usb-server
 
 **Interactive Mode:**
 ```bash
-# Run with TUI
-p2p-usb-client
-
 # Connect to specific server
 p2p-usb-client --connect <server-node-id>
 
@@ -329,6 +331,14 @@ p2p-usb-client --config /path/to/config.toml
 - Monitor logs for connection attempts
 - Rotate Iroh identities periodically (TODO: implement)
 - Run server with minimal privileges (udev rules instead of root)
+
+- Run server with minimal privileges (udev rules instead of root)
+
+## Known Issues
+
+- **Virtual USB Stalls**: Occasionally, virtual device enumeration may stall on the client side. Retrying the connection usually resolves this.
+- **Isochronous Transfers**: Webcams and audio devices (isochronous transfers) are not yet supported.
+- **Platform Support**: Client is currently Linux-only. Windows and macOS support is planned (virtual USB drivers are the main blocker).
 
 ## Building from Source
 
@@ -548,7 +558,7 @@ RUST_LOG=debug p2p-usb-server 2>&1 | tee server.log
 ### Phase 2: User Experience (v0.2) - IN PROGRESS
 - [x] CLI argument parsing
 - [x] Comprehensive logging with tracing
-- [ ] Terminal UI (TUI) for server and client
+- [x] Terminal UI (TUI) for server and client
 - [ ] Error recovery and reconnection
 - [ ] Performance metrics display
 - [ ] Device filtering by VID/PID
@@ -606,8 +616,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Support
 
-- Issues: [GitHub Issues](https://github.com/yourusername/rust-p2p-usb/issues)
-- Discussions: [GitHub Discussions](https://github.com/yourusername/rust-p2p-usb/discussions)
+- Issues: [GitHub Issues](https://github.com/kimasplund/rust-p2p-usb/issues)
+- Discussions: [GitHub Discussions](https://github.com/kimasplund/rust-p2p-usb/discussions)
 
 ---
 

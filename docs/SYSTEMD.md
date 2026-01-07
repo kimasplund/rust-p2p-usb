@@ -109,7 +109,7 @@ The service file is located at `/etc/systemd/system/p2p-usb-server.service`:
 ```ini
 [Unit]
 Description=P2P USB Server - Share USB devices over the internet
-Documentation=https://github.com/yourusername/rust-p2p-usb
+Documentation=https://github.com/kimasplund/rust-p2p-usb
 After=network-online.target
 Wants=network-online.target
 
@@ -215,7 +215,7 @@ Example output:
 ● p2p-usb-server.service - P2P USB Server - Share USB devices over the internet
      Loaded: loaded (/etc/systemd/system/p2p-usb-server.service; enabled; preset: enabled)
      Active: active (running) since Thu 2025-10-31 12:00:00 UTC; 2h 15min ago
-       Docs: https://github.com/yourusername/rust-p2p-usb
+       Docs: https://github.com/kimasplund/rust-p2p-usb
    Main PID: 12345 (p2p-usb-server)
       Tasks: 8 (limit: 4566)
      Memory: 45.2M
@@ -714,4 +714,4 @@ IOSchedulingPriority=0
 
 ---
 
-**Need help?** Open an issue at [GitHub Issues](https://github.com/yourusername/rust-p2p-usb/issues)
+**Need help?** Open an issue at [GitHub Issues](https://github.com/kimasplund/rust-p2p-usb/issues)

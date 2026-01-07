@@ -32,11 +32,16 @@ pub struct DeviceManager {
     _hotplug_registration: Option<Registration<Context>>,
     /// Event sender for hot-plug notifications
     event_sender: async_channel::Sender<UsbEvent>,
+    /// Device filters (VID:PID patterns)
+    allowed_filters: Vec<String>,
 }
 
 impl DeviceManager {
     /// Create a new device manager
-    pub fn new(event_sender: async_channel::Sender<UsbEvent>) -> Result<Self, rusb::Error> {
+    pub fn new(
+        event_sender: async_channel::Sender<UsbEvent>,
+        allowed_filters: Vec<String>,
+    ) -> Result<Self, rusb::Error> {
         let context = Context::new()?;
 
         Ok(Self {
@@ -48,6 +53,7 @@ impl DeviceManager {
             next_handle_id: 1,
             _hotplug_registration: None,
             event_sender,
+            allowed_filters,
         })
     }
 
@@ -103,6 +109,24 @@ impl DeviceManager {
         let bus = device.bus_number();
         let address = device.address();
         let key = (bus, address);
+
+        // Check if device is allowed based on filters
+        if !self.is_device_allowed(&device) {
+            debug!(
+                "Device ignored by filter: bus={}, addr={}, vid={:#x}, pid={:#x}",
+                bus,
+                address,
+                device
+                    .device_descriptor()
+                    .map(|d| d.vendor_id())
+                    .unwrap_or(0),
+                device
+                    .device_descriptor()
+                    .map(|d| d.product_id())
+                    .unwrap_or(0)
+            );
+            return Err(rusb::Error::Access); // Treat as access denied / filtered out
+        }
 
         // Check if already tracked
         if let Some(existing_device) = self.devices.get(&key) {
@@ -284,6 +308,64 @@ impl DeviceManager {
     pub fn context(&self) -> &Context {
         &self.context
     }
+    /// Check if a device is allowed by the configured filters
+    fn is_device_allowed(&self, device: &Device<Context>) -> bool {
+        let desc = match device.device_descriptor() {
+            Ok(d) => d,
+            Err(_) => return false,
+        };
+
+        Self::check_filter(desc.vendor_id(), desc.product_id(), &self.allowed_filters)
+    }
+
+    /// Check if a VID/PID pair is allowed by the filters
+    fn check_filter(vid: u16, pid: u16, filters: &[String]) -> bool {
+        // If no filters are defined, all devices are allowed
+        if filters.is_empty() {
+            return true;
+        }
+
+        // Check if device matches any filter
+        for filter in filters {
+            // Filter format: "0xVID:0xPID" or "0xVID:*"
+            // We assume filters are validated by config loader
+            let parts: Vec<&str> = filter.split(':').collect();
+            if parts.len() != 2 {
+                continue;
+            }
+
+            let filter_vid_str = parts[0];
+            let filter_pid_str = parts[1];
+
+            // Check VID
+            let vid_match = if filter_vid_str == "*" {
+                true
+            } else {
+                u16::from_str_radix(filter_vid_str.trim_start_matches("0x"), 16)
+                    .map(|v| v == vid)
+                    .unwrap_or(false)
+            };
+
+            if !vid_match {
+                continue;
+            }
+
+            // Check PID
+            let pid_match = if filter_pid_str == "*" {
+                true
+            } else {
+                u16::from_str_radix(filter_pid_str.trim_start_matches("0x"), 16)
+                    .map(|p| p == pid)
+                    .unwrap_or(false)
+            };
+
+            if pid_match {
+                return true;
+            }
+        }
+
+        false
+    }
 }
 
 /// Hot-plug callback handler
@@ -334,10 +416,33 @@ mod tests {
     #[test]
     fn test_device_id_assignment() {
         let (tx, _rx) = async_channel::bounded(1);
-        let manager = DeviceManager::new(tx).unwrap();
+        let manager = DeviceManager::new(tx, vec![]).unwrap();
 
         assert_eq!(manager.next_device_id, 1);
         assert_eq!(manager.next_handle_id, 1);
+    }
+
+    #[test]
+    fn test_filter_logic() {
+        let filters = vec![
+            "0x1234:0x5678".to_string(), // Exact match
+            "0xABCD:*".to_string(),      // Wildcard PID
+        ];
+
+        // Should match exact
+        assert!(DeviceManager::check_filter(0x1234, 0x5678, &filters));
+
+        // Should match wildcard
+        assert!(DeviceManager::check_filter(0xABCD, 0x1111, &filters));
+        assert!(DeviceManager::check_filter(0xABCD, 0x9999, &filters));
+
+        // Should not match
+        assert!(!DeviceManager::check_filter(0x1234, 0x9999, &filters)); // Wrong PID
+        assert!(!DeviceManager::check_filter(0x9999, 0x5678, &filters)); // Wrong VID
+        assert!(!DeviceManager::check_filter(0x0000, 0x0000, &filters));
+
+        // Empty filters = allow all
+        assert!(DeviceManager::check_filter(0x1234, 0x5678, &[]));
     }
 
     #[test]

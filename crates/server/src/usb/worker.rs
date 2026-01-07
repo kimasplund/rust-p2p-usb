@@ -176,6 +176,21 @@ impl UsbWorkerThread {
                 let _ = response.send(usb_response);
             }
 
+            UsbCommand::ResetDevice { handle, response } => {
+                debug!("Resetting device handle {:?}", handle);
+                let result = match self.manager.get_device_by_handle(handle) {
+                    Some(device) => match device.handle_mut() {
+                        Some(device_handle) => match device_handle.reset() {
+                            Ok(_) => Ok(()),
+                            Err(e) => Err(crate::usb::transfers::map_rusb_error(e)),
+                        },
+                        None => Err(protocol::UsbError::NotFound),
+                    },
+                    None => Err(protocol::UsbError::NotFound),
+                };
+                let _ = response.send(result);
+            }
+
             UsbCommand::Shutdown => {
                 // Already handled in main loop
                 unreachable!()

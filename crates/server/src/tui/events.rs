@@ -40,6 +40,10 @@ pub enum Action {
     CloseDialog,
     /// Refresh device list
     Refresh,
+    /// Reset selected device
+    ResetDevice,
+    /// Confirm action (Enter/y)
+    Confirm,
     /// No action
     None,
 }
@@ -58,10 +62,12 @@ impl From<KeyEvent> for Action {
 
             // Actions
             KeyCode::Char(' ') => Action::ToggleSharing,
-            KeyCode::Enter => Action::ViewDetails,
+            KeyCode::Enter => Action::ViewDetails, // Also confirms dialogs via context handling
+            KeyCode::Char('y') => Action::Confirm,
             KeyCode::Char('c') => Action::ViewClients,
             KeyCode::Char('?') => Action::ShowHelp,
             KeyCode::Char('r') => Action::Refresh,
+            KeyCode::Char('R') => Action::ResetDevice,
 
             _ => Action::None,
         }

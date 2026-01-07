@@ -93,8 +93,7 @@ pub struct UsbRequest {
 
 /// USB transfer types
 ///
-/// Supports control, interrupt, and bulk transfers. Isochronous transfers
-/// are not supported in v1.0 due to timing requirements over network.
+/// Supports control, interrupt, bulk, and isochronous transfers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TransferType {
     /// Control transfer (endpoint 0)
@@ -138,6 +137,25 @@ pub enum TransferType {
         /// Timeout in milliseconds
         timeout_ms: u32,
     },
+    /*
+    /// Isochronous transfer (Currently disabled due to rusb limitations)
+    ///
+    /// Used for audio/video streaming devices.
+    Isochronous {
+        /// Endpoint address (includes direction bit)
+        endpoint: u8,
+        /// Data to send (OUT) or empty vec for IN transfers.
+        ///
+        /// For IN transfers:
+        /// The buffer size should be `num_packets * packet_len`.
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
+        /// Length of each packet in the transfer
+        packet_lengths: Vec<u32>,
+        /// Timeout in milliseconds
+        timeout_ms: u32,
+    },
+    */
 }
 
 /// USB transfer response (server -> client)

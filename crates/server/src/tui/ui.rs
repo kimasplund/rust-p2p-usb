@@ -40,6 +40,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Dialog::Help => render_help_dialog(frame),
         Dialog::DeviceDetails => render_device_details_dialog(frame, app),
         Dialog::Clients => render_clients_dialog(frame, app),
+        Dialog::ConfirmReset => render_confirm_reset_dialog(frame, app),
     }
 }
 
@@ -215,6 +216,13 @@ fn render_help_bar(frame: &mut Frame, area: Rect) {
         ),
         Span::raw(" Clients  "),
         Span::styled(
+            "R",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" Reset  "),
+        Span::styled(
             "?",
             Style::default()
                 .fg(Color::Yellow)
@@ -277,6 +285,10 @@ fn render_help_dialog(frame: &mut Frame) {
         Line::from(vec![
             Span::styled("  r            ", Style::default().fg(Color::Cyan)),
             Span::raw("Refresh device list"),
+        ]),
+        Line::from(vec![
+            Span::styled("  R            ", Style::default().fg(Color::Cyan)),
+            Span::raw("Reset selected device"),
         ]),
         Line::from(""),
         Line::from(vec![Span::styled(
@@ -527,6 +539,59 @@ fn render_clients_dialog(frame: &mut Frame, app: &App) {
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Cyan)),
         )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(paragraph, area);
+}
+
+/// Render the confirm reset dialog
+fn render_confirm_reset_dialog(frame: &mut Frame, app: &App) {
+    let area = centered_rect(40, 20, frame.area());
+
+    let device_name = if let Some(device) = app.selected_device() {
+        device
+            .info
+            .product
+            .as_deref()
+            .unwrap_or("Unknown Device")
+            .to_string()
+    } else {
+        "Unknown Device".to_string()
+    };
+
+    let content = vec![
+        Line::from(Span::styled(
+            "Are you sure you want to reset this device?",
+            Style::default().fg(Color::White),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            device_name,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("y / Enter", Style::default().fg(Color::Red)),
+            Span::raw(" to confirm"),
+        ]),
+        Line::from(vec![
+            Span::styled("Esc", Style::default().fg(Color::Green)),
+            Span::raw(" to cancel"),
+        ]),
+    ];
+
+    let paragraph = Paragraph::new(content)
+        .block(
+            Block::default()
+                .title(" Confirm Reset ")
+                .title_alignment(Alignment::Center)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Red)),
+        )
+        .alignment(Alignment::Center)
         .wrap(Wrap { trim: false });
 
     frame.render_widget(Clear, area);

@@ -40,6 +40,15 @@ pub fn execute_transfer(
             data,
             timeout_ms,
         } => execute_interrupt_transfer(handle, endpoint, data, timeout_ms),
+
+        /*
+        TransferType::Isochronous {
+            endpoint,
+            data,
+            packet_lengths,
+            timeout_ms,
+        } => execute_isochronous_transfer(handle, endpoint, data, packet_lengths, timeout_ms),
+        */
     };
 
     UsbResponse {
@@ -255,6 +264,67 @@ fn execute_interrupt_transfer(
         }
     }
 }
+
+/*
+/// Execute an isochronous transfer
+///
+/// Isochronous transfers are used for audio/video streaming.
+/// For IN transfers, packet_lengths specifies expected size for each packet.
+/// For OUT transfers, data contains contiguous packet data, and packet_lengths specifies split.
+fn execute_isochronous_transfer(
+    handle: &mut DeviceHandle<rusb::Context>,
+    endpoint: u8,
+    data: Vec<u8>,
+    packet_lengths: Vec<u32>,
+    timeout_ms: u32,
+) -> TransferResult {
+    let is_in = (endpoint & 0x80) != 0;
+    let timeout = Duration::from_millis(timeout_ms as u64);
+
+    debug!(
+        "Isochronous transfer: endpoint={:#x}, packets={}, total_len={}, is_in={}",
+        endpoint,
+        packet_lengths.len(),
+        data.len(),
+        is_in
+    );
+
+    // Convert packet lengths to i32 for rusb
+    let iso_packet_lengths: Vec<i32> = packet_lengths.iter().map(|&l| l as i32).collect();
+
+    let result = if is_in {
+        // IN transfer: read from device
+        // Calculate total buffer size from packet lengths
+        let total_len: usize = packet_lengths.iter().map(|&l| l as usize).sum();
+        let mut buffer = vec![0u8; total_len];
+
+        match handle.read_isochronous(endpoint, &mut buffer, &iso_packet_lengths, timeout) {
+            Ok(len) => {
+                buffer.truncate(len);
+                Ok(buffer)
+            }
+            Err(e) => Err(map_rusb_error(e)),
+        }
+    } else {
+        // OUT transfer: write to device
+        match handle.write_isochronous(endpoint, &data, &iso_packet_lengths, timeout) {
+            Ok(_len) => Ok(Vec::new()),
+            Err(e) => Err(map_rusb_error(e)),
+        }
+    };
+
+    match result {
+        Ok(data) => {
+            debug!("Isochronous transfer succeeded: {} bytes", data.len());
+            TransferResult::Success { data }
+        }
+        Err(error) => {
+            warn!("Isochronous transfer failed: {:?}", error);
+            TransferResult::Error { error }
+        }
+    }
+}
+*/
 
 /// Map rusb::Error to protocol::UsbError
 ///

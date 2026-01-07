@@ -163,6 +163,59 @@ async fn create_iroh_client(config: &config::ClientConfig) -> Result<IrohClient>
     IrohClient::new(network_config).await
 }
 
+/// Resolve a server identifier to an EndpointId
+///
+/// Accepts either:
+/// - A full EndpointId hex string (64 chars)
+/// - A server name from config (e.g., "pi5-kim")
+///
+/// This allows users to connect with friendly names:
+///   `--connect pi5-kim` instead of `--connect e8f5a338d37c...`
+fn resolve_server_id(server_str: &str, config: &config::ClientConfig) -> Result<EndpointId> {
+    // First, try parsing as EndpointId directly
+    if let Ok(endpoint_id) = server_str.parse::<EndpointId>() {
+        return Ok(endpoint_id);
+    }
+
+    debug!("Looking up server '{}' in {} configured servers",
+           server_str, config.servers.configured.len());
+
+    // Look up by name in configured servers
+    for server in &config.servers.configured {
+        if let Some(name) = &server.name {
+            if name.eq_ignore_ascii_case(server_str) {
+                return server.node_id.parse::<EndpointId>().context(format!(
+                    "Server '{}' has invalid node_id in config: {}",
+                    name, server.node_id
+                ));
+            }
+        }
+    }
+
+    // Not found - provide helpful error
+    let configured_names: Vec<&str> = config
+        .servers
+        .configured
+        .iter()
+        .filter_map(|s| s.name.as_deref())
+        .collect();
+
+    if configured_names.is_empty() {
+        anyhow::bail!(
+            "Unknown server '{}'. No named servers in config. \
+            Use full EndpointId or add servers to config with [servers.configured]",
+            server_str
+        );
+    } else {
+        anyhow::bail!(
+            "Unknown server '{}'. Available: {}. \
+            Or use full EndpointId.",
+            server_str,
+            configured_names.join(", ")
+        );
+    }
+}
+
 /// Connect to specific server and run in connected mode
 async fn connect_and_run(
     client: Arc<IrohClient>,
@@ -171,12 +224,10 @@ async fn connect_and_run(
     config: &config::ClientConfig,
     headless: bool,
 ) -> Result<()> {
-    info!("Connecting to server: {}", server_id_str);
-
-    // Parse server EndpointId
-    let server_id = server_id_str
-        .parse::<EndpointId>()
-        .context("Invalid server EndpointId format")?;
+    // Resolve server name or EndpointId
+    let server_id = resolve_server_id(server_id_str, config)?;
+    let display_name = config.server_display_name(&server_id.to_string());
+    info!("Connecting to server: {} ({})", display_name, server_id);
 
     // Connect to server
     client

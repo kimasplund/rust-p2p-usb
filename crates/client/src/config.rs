@@ -173,6 +173,18 @@ impl ClientConfig {
         config.validate()?;
 
         tracing::info!("Loaded configuration from: {}", config_path.display());
+        tracing::debug!(
+            "Config: {} approved_servers, {} configured servers",
+            config.servers.approved_servers.len(),
+            config.servers.configured.len()
+        );
+        for server in &config.servers.configured {
+            tracing::debug!(
+                "  Server: name={:?}, node_id={}...",
+                server.name,
+                &server.node_id[..12.min(server.node_id.len())]
+            );
+        }
         Ok(config)
     }
 
@@ -181,7 +193,8 @@ impl ClientConfig {
         match Self::load(None) {
             Ok(config) => config,
             Err(e) => {
-                tracing::warn!("Failed to load config: {}, using defaults", e);
+                // Print to stderr since logging might not be initialized yet
+                eprintln!("Config: {}", e);
                 Self::default()
             }
         }
@@ -208,9 +221,9 @@ impl ClientConfig {
     /// Get the default configuration file path
     pub fn default_path() -> PathBuf {
         if let Some(config_dir) = dirs::config_dir() {
-            config_dir.join("rust-p2p-usb").join("client.toml")
+            config_dir.join("p2p-usb").join("client.toml")
         } else {
-            PathBuf::from(".config/rust-p2p-usb/client.toml")
+            PathBuf::from(".config/p2p-usb/client.toml")
         }
     }
 

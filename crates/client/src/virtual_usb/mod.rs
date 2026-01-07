@@ -19,6 +19,7 @@
 
 use anyhow::Result;
 use protocol::DeviceHandle;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::network::device_proxy::DeviceProxy;
@@ -125,5 +126,41 @@ impl VirtualUsbManager {
         self.inner
             .handle_device_removed(device_id, invalidated_handles)
             .await
+    }
+
+    /// Get the device IDs of all locally attached virtual devices
+    ///
+    /// Returns a set of DeviceIds for devices currently attached via USB/IP.
+    /// Used for reconciliation after reconnection to compare with server state.
+    #[cfg(target_os = "linux")]
+    pub async fn get_attached_device_ids(&self) -> HashSet<protocol::DeviceId> {
+        self.inner.get_attached_device_ids().await
+    }
+
+    /// Get the device IDs of all locally attached virtual devices
+    ///
+    /// Returns a set of DeviceIds for devices currently attached via USB/IP.
+    /// Used for reconciliation after reconnection to compare with server state.
+    #[cfg(not(target_os = "linux"))]
+    pub async fn get_attached_device_ids(&self) -> HashSet<protocol::DeviceId> {
+        HashSet::new()
+    }
+
+    /// Get detailed information about all attached virtual devices
+    ///
+    /// Returns a vector of (DeviceHandle, DeviceId) pairs for all attached devices.
+    /// Used for reconciliation to identify which devices to detach.
+    #[cfg(target_os = "linux")]
+    pub async fn get_attached_device_info(&self) -> Vec<(DeviceHandle, protocol::DeviceId)> {
+        self.inner.get_attached_device_info().await
+    }
+
+    /// Get detailed information about all attached virtual devices
+    ///
+    /// Returns a vector of (DeviceHandle, DeviceId) pairs for all attached devices.
+    /// Used for reconciliation to identify which devices to detach.
+    #[cfg(not(target_os = "linux"))]
+    pub async fn get_attached_device_info(&self) -> Vec<(DeviceHandle, protocol::DeviceId)> {
+        Vec::new()
     }
 }

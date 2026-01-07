@@ -9,7 +9,36 @@ use protocol::{AttachError, DetachError, DeviceHandle, DeviceId, DeviceInfo};
 use rusb::{Context, Device, Hotplug, HotplugBuilder, Registration, UsbContext};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
+
+/// Debounce duration for USB hotplug events (500ms)
+const HOTPLUG_DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
+
+/// Type of pending hotplug event
+#[derive(Debug, Clone)]
+pub enum PendingHotplugEvent {
+    /// Device arrived
+    Arrived,
+    /// Device left
+    Left,
+}
+
+/// A pending debounced hotplug event
+#[derive(Debug, Clone)]
+pub struct DebouncedEvent {
+    /// Type of event
+    pub event_type: PendingHotplugEvent,
+    /// When this event should fire (after debounce period)
+    pub fire_at: Instant,
+    /// Bus number
+    pub bus: u8,
+    /// Device address
+    pub address: u8,
+}
+
+/// Shared debounce state between HotplugCallback and DeviceManager
+pub type DebounceState = Arc<std::sync::Mutex<HashMap<(u8, u8), DebouncedEvent>>>;
 
 /// USB device manager
 ///
@@ -34,6 +63,8 @@ pub struct DeviceManager {
     event_sender: async_channel::Sender<UsbEvent>,
     /// Device filters (VID:PID patterns)
     allowed_filters: Vec<String>,
+    /// Shared debounce state for hotplug events
+    debounce_state: DebounceState,
 }
 
 impl DeviceManager {
@@ -54,6 +85,7 @@ impl DeviceManager {
             _hotplug_registration: None,
             event_sender,
             allowed_filters,
+            debounce_state: Arc::new(std::sync::Mutex::new(HashMap::new())),
         })
     }
 
@@ -90,10 +122,10 @@ impl DeviceManager {
 
     /// Register hot-plug callbacks
     fn register_hotplug(&mut self) -> Result<(), rusb::Error> {
-        let event_sender = self.event_sender.clone();
+        let debounce_state = Arc::clone(&self.debounce_state);
 
-        // Create hotplug callback
-        let callback = HotplugCallback::new(event_sender);
+        // Create hotplug callback with shared debounce state
+        let callback = HotplugCallback::new(debounce_state);
 
         let registration = HotplugBuilder::new()
             .enumerate(false) // We already enumerated
@@ -171,60 +203,155 @@ impl DeviceManager {
     }
 
     /// Remove a device from the registry
-    fn remove_device(&mut self, bus: u8, address: u8) -> Option<DeviceId> {
+    ///
+    /// Returns the DeviceId and any invalidated handles with their client IDs.
+    fn remove_device(
+        &mut self,
+        bus: u8,
+        address: u8,
+    ) -> Option<(DeviceId, Vec<DeviceHandle>, Vec<String>)> {
         let key = (bus, address);
 
         if let Some(device) = self.devices.remove(&key) {
             let device_id = device.id();
             self.device_ids.remove(&device_id);
 
-            // Remove from attached list if present
-            self.attached
-                .retain(|_handle, (id, _client)| *id != device_id);
+            // Collect invalidated handles and affected clients before removing
+            let mut invalidated_handles = Vec::new();
+            let mut affected_clients = Vec::new();
+
+            self.attached.retain(|handle, (id, client)| {
+                if *id == device_id {
+                    invalidated_handles.push(*handle);
+                    if !affected_clients.contains(client) {
+                        affected_clients.push(client.clone());
+                    }
+                    false // Remove this entry
+                } else {
+                    true // Keep this entry
+                }
+            });
 
             debug!(
-                "Removed device {:?}: bus={}, addr={}",
-                device_id, bus, address
+                "Removed device {:?}: bus={}, addr={}, invalidated {} handles for {} clients",
+                device_id,
+                bus,
+                address,
+                invalidated_handles.len(),
+                affected_clients.len()
             );
 
-            Some(device_id)
+            Some((device_id, invalidated_handles, affected_clients))
         } else {
             None
         }
     }
 
-    /// Handle device arrival (from hot-plug callback)
-    pub fn handle_device_arrived(&mut self, device: Device<Context>) {
-        match self.add_device(device.clone()) {
-            Ok(device_id) => {
-                // Get device info and send event
-                if let Some(usb_device) = self.get_device_by_id(device_id) {
-                    let device_info = usb_device.device_info();
+    /// Handle device removal (from hot-plug callback)
+    fn handle_device_left_internal(&mut self, bus: u8, address: u8) {
+        if let Some((device_id, invalidated_handles, affected_clients)) =
+            self.remove_device(bus, address)
+        {
+            info!(
+                "Device {:?} left: {} handles invalidated, {} clients affected",
+                device_id,
+                invalidated_handles.len(),
+                affected_clients.len()
+            );
 
-                    if let Err(e) = self.event_sender.send_blocking(UsbEvent::DeviceArrived {
-                        device: device_info,
-                    }) {
-                        error!("Failed to send DeviceArrived event: {}", e);
-                    }
-                }
-            }
-            Err(e) => {
-                warn!("Failed to add arrived device: {}", e);
+            if let Err(e) = self.event_sender.send_blocking(UsbEvent::DeviceLeft {
+                device_id,
+                invalidated_handles,
+                affected_clients,
+            }) {
+                error!("Failed to send DeviceLeft event: {}", e);
             }
         }
     }
 
-    /// Handle device removal (from hot-plug callback)
-    pub fn handle_device_left(&mut self, bus: u8, address: u8) {
-        if let Some(device_id) = self.remove_device(bus, address)
-            && let Err(e) = self.event_sender.send_blocking(UsbEvent::DeviceLeft {
-                device_id,
-                invalidated_handles: Vec::new(), // Handled by ClientConnection locally
-                affected_clients: Vec::new(),    // Handled by ClientConnection locally
-            })
-        {
-            error!("Failed to send DeviceLeft event: {}", e);
+    /// Handle device arrival (from hot-plug callback) - internal implementation
+    fn handle_device_arrived_internal(&mut self, bus: u8, address: u8) {
+        let devices = match self.context.devices() {
+            Ok(d) => d,
+            Err(e) => {
+                warn!("Failed to enumerate devices for arrival: {}", e);
+                return;
+            }
+        };
+
+        for device in devices.iter() {
+            if device.bus_number() == bus && device.address() == address {
+                match self.add_device(device) {
+                    Ok(device_id) => {
+                        if let Some(usb_device) = self.get_device_by_id(device_id) {
+                            let device_info = usb_device.device_info();
+
+                            if let Err(e) =
+                                self.event_sender.send_blocking(UsbEvent::DeviceArrived {
+                                    device: device_info,
+                                })
+                            {
+                                error!("Failed to send DeviceArrived event: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to add arrived device: {}", e);
+                    }
+                }
+                return;
+            }
         }
+        debug!(
+            "Device arrived but not found in enumeration: bus={}, addr={}",
+            bus, address
+        );
+    }
+
+    /// Process any debounced hotplug events that are ready to fire
+    ///
+    /// This should be called periodically from the USB worker event loop.
+    /// Returns the number of events processed.
+    pub fn process_debounced_events(&mut self) -> usize {
+        let now = Instant::now();
+        let mut events_to_process = Vec::new();
+
+        // Collect events that are ready to fire
+        {
+            let mut state = self.debounce_state.lock().unwrap();
+            let ready_keys: Vec<(u8, u8)> = state
+                .iter()
+                .filter(|(_, event)| now >= event.fire_at)
+                .map(|(key, _)| *key)
+                .collect();
+
+            for key in ready_keys {
+                if let Some(event) = state.remove(&key) {
+                    events_to_process.push(event);
+                }
+            }
+        }
+
+        let count = events_to_process.len();
+
+        // Process each ready event
+        for event in events_to_process {
+            info!(
+                "Debounce timer fired for device bus={}, addr={}: {:?}",
+                event.bus, event.address, event.event_type
+            );
+
+            match event.event_type {
+                PendingHotplugEvent::Arrived => {
+                    self.handle_device_arrived_internal(event.bus, event.address);
+                }
+                PendingHotplugEvent::Left => {
+                    self.handle_device_left_internal(event.bus, event.address);
+                }
+            }
+        }
+
+        count
     }
 
     /// List all discovered devices
@@ -373,41 +500,80 @@ impl DeviceManager {
 /// Hot-plug callback handler
 ///
 /// This struct implements the Hotplug trait to receive notifications
-/// about device arrival and removal.
+/// about device arrival and removal. Events are debounced by 500ms per device
+/// to handle rapid plug/unplug cycles gracefully.
 struct HotplugCallback {
-    event_sender: async_channel::Sender<UsbEvent>,
-    // Store device info temporarily since we can't access manager in callback
-    devices_cache: Arc<std::sync::Mutex<HashMap<(u8, u8), DeviceId>>>,
+    /// Shared debounce state with DeviceManager
+    debounce_state: DebounceState,
 }
 
 impl HotplugCallback {
-    fn new(event_sender: async_channel::Sender<UsbEvent>) -> Self {
-        Self {
-            event_sender,
-            devices_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
+    fn new(debounce_state: DebounceState) -> Self {
+        Self { debounce_state }
+    }
+
+    /// Schedule a debounced event for a device
+    ///
+    /// If an event for this device is already pending, it will be replaced
+    /// (the timer is reset). This handles rapid plug/unplug cycles by only
+    /// processing the final state after 500ms of stability.
+    fn schedule_debounced_event(&self, bus: u8, address: u8, event_type: PendingHotplugEvent) {
+        let key = (bus, address);
+        let fire_at = Instant::now() + HOTPLUG_DEBOUNCE_DURATION;
+
+        let mut state = self.debounce_state.lock().unwrap();
+
+        // Check if there's an existing pending event for this device
+        if let Some(existing) = state.get(&key) {
+            debug!(
+                "Debounce: replacing pending {:?} event with {:?} for bus={}, addr={}",
+                existing.event_type, event_type, bus, address
+            );
+        } else {
+            debug!(
+                "Debounce: scheduling {:?} event for bus={}, addr={} (fires in 500ms)",
+                event_type, bus, address
+            );
         }
+
+        // Insert or replace the pending event
+        state.insert(
+            key,
+            DebouncedEvent {
+                event_type,
+                fire_at,
+                bus,
+                address,
+            },
+        );
     }
 }
 
 impl<T: UsbContext> Hotplug<T> for HotplugCallback {
     fn device_arrived(&mut self, device: Device<T>) {
-        // We can't directly access the device manager from here
-        // The actual handling is done in the worker thread via handle_device_arrived
-        // This is just a notification that we received the event
+        let bus = device.bus_number();
+        let address = device.address();
+
         debug!(
             "Hot-plug callback: device arrived (bus={}, addr={})",
-            device.bus_number(),
-            device.address()
+            bus, address
         );
+
+        // Schedule debounced arrival event
+        self.schedule_debounced_event(bus, address, PendingHotplugEvent::Arrived);
     }
 
     fn device_left(&mut self, device: Device<T>) {
-        // Similar to device_arrived, actual handling is in worker thread
+        let bus = device.bus_number();
+        let address = device.address();
+
         debug!(
             "Hot-plug callback: device left (bus={}, addr={})",
-            device.bus_number(),
-            device.address()
+            bus, address
         );
+
+        // Schedule debounced removal event
+        self.schedule_debounced_event(bus, address, PendingHotplugEvent::Left);
     }
 }
 

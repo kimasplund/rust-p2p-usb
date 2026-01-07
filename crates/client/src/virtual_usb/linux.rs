@@ -33,7 +33,7 @@
 
 use anyhow::{Context, Result, anyhow};
 use protocol::{DeviceHandle, DeviceSpeed};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -232,6 +232,30 @@ impl LinuxVirtualUsbManager {
     /// List all attached virtual devices
     pub async fn list_devices(&self) -> Vec<DeviceHandle> {
         self.attached_devices.read().await.keys().copied().collect()
+    }
+
+    /// Get the device IDs of all locally attached virtual devices
+    ///
+    /// Returns a set of DeviceIds for devices currently attached via USB/IP.
+    /// Used for reconciliation after reconnection to compare with server state.
+    pub async fn get_attached_device_ids(&self) -> HashSet<protocol::DeviceId> {
+        let devices = self.attached_devices.read().await;
+        devices
+            .values()
+            .map(|device| device.descriptor().id)
+            .collect()
+    }
+
+    /// Get detailed information about all attached virtual devices
+    ///
+    /// Returns a vector of (DeviceHandle, DeviceId) pairs for all attached devices.
+    /// Used for reconciliation to identify which devices to detach.
+    pub async fn get_attached_device_info(&self) -> Vec<(DeviceHandle, protocol::DeviceId)> {
+        let devices = self.attached_devices.read().await;
+        devices
+            .iter()
+            .map(|(handle, device)| (*handle, device.descriptor().id))
+            .collect()
     }
 
     /// Allocate a VHCI port based on device speed

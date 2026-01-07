@@ -10,11 +10,13 @@ use iroh::PublicKey as EndpointId;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 
 use protocol::{
-    CURRENT_VERSION, DeviceHandle, DeviceId, Message, MessagePayload, UsbRequest, decode_framed,
-    encode_framed, validate_version,
+    CURRENT_VERSION, DeviceHandle, DeviceId, Message, MessagePayload, RequestId, UsbRequest,
+    decode_framed, encode_framed, validate_version,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::{broadcast, Mutex};
 use tokio::time;
 use tracing::{debug, error, info, trace, warn};
 
@@ -23,6 +25,17 @@ const MESSAGE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Keep-alive ping interval (30 seconds)
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Pending USB transfer awaiting completion or cancellation
+struct PendingTransfer {
+    /// Request ID for matching responses
+    request_id: RequestId,
+    /// Sender to signal cancellation
+    cancel_tx: broadcast::Sender<()>,
+}
+
+/// Tracks pending transfers per device handle
+type PendingTransfersMap = Arc<Mutex<HashMap<DeviceHandle, Vec<PendingTransfer>>>>;
 
 /// Per-client connection handler
 ///
@@ -38,6 +51,8 @@ pub struct ClientConnection {
     usb_bridge: UsbBridge,
     /// Attached devices (handle -> device_id mapping)
     attached_devices: HashMap<DeviceHandle, DeviceId>,
+    /// Pending transfers per device handle (for cancellation on hot-unplug)
+    pending_transfers: PendingTransfersMap,
     /// Last activity timestamp (for keep-alive)
     last_activity: Instant,
     /// Client supports push notifications (determined during capability exchange)
@@ -52,6 +67,7 @@ impl ClientConnection {
             connection,
             usb_bridge,
             attached_devices: HashMap::new(),
+            pending_transfers: Arc::new(Mutex::new(HashMap::new())),
             last_activity: Instant::now(),
             client_supports_push: false,
         }
@@ -342,6 +358,21 @@ impl ClientConnection {
             });
         }
 
+        // Create cancellation channel for this transfer
+        let (cancel_tx, mut cancel_rx) = broadcast::channel::<()>(1);
+        let pending = PendingTransfer {
+            request_id: request.id,
+            cancel_tx,
+        };
+
+        // Register pending transfer
+        let handle = request.handle;
+        let request_id = request.id;
+        {
+            let mut pending_map = self.pending_transfers.lock().await;
+            pending_map.entry(handle).or_default().push(pending);
+        }
+
         // Send command to USB subsystem
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.usb_bridge
@@ -352,8 +383,43 @@ impl ClientConnection {
             })
             .await?;
 
-        // Wait for response
-        let response = rx.await?;
+        // Wait for either transfer completion or cancellation
+        let response = tokio::select! {
+            result = rx => {
+                match result {
+                    Ok(response) => response,
+                    Err(_) => {
+                        warn!("Transfer response channel closed for {:?}", request_id);
+                        protocol::UsbResponse {
+                            id: request_id,
+                            result: protocol::TransferResult::Error {
+                                error: protocol::UsbError::NoDevice,
+                            },
+                        }
+                    }
+                }
+            }
+            _ = cancel_rx.recv() => {
+                info!("Transfer {:?} cancelled due to device hot-unplug", request_id);
+                protocol::UsbResponse {
+                    id: request_id,
+                    result: protocol::TransferResult::Error {
+                        error: protocol::UsbError::NoDevice,
+                    },
+                }
+            }
+        };
+
+        // Remove this transfer from pending map
+        {
+            let mut pending_map = self.pending_transfers.lock().await;
+            if let Some(transfers) = pending_map.get_mut(&handle) {
+                transfers.retain(|t| t.request_id != request_id);
+                if transfers.is_empty() {
+                    pending_map.remove(&handle);
+                }
+            }
+        }
 
         Ok(MessagePayload::TransferComplete { response })
     }
@@ -410,6 +476,16 @@ impl ClientConnection {
                     device_id, invalidated_handles, affected_clients
                 );
 
+                // Cancel all pending transfers for invalidated handles
+                let cancelled_count =
+                    self.cancel_pending_transfers(&invalidated_handles).await;
+                if cancelled_count > 0 {
+                    info!(
+                        "Cancelled {} pending transfers for device {:?}",
+                        cancelled_count, device_id
+                    );
+                }
+
                 // Remove invalidated handles from our attached devices map
                 for handle in &invalidated_handles {
                     if self.attached_devices.remove(handle).is_some() {
@@ -425,6 +501,18 @@ impl ClientConnection {
                     .filter(|(_, id)| **id == device_id)
                     .map(|(handle, _)| *handle)
                     .collect();
+
+                // Cancel pending transfers for remaining handles too
+                if !remaining_handles.is_empty() {
+                    let additional_cancelled =
+                        self.cancel_pending_transfers(&remaining_handles).await;
+                    if additional_cancelled > 0 {
+                        info!(
+                            "Cancelled {} additional pending transfers (fallback)",
+                            additional_cancelled
+                        );
+                    }
+                }
 
                 for handle in remaining_handles {
                     self.attached_devices.remove(&handle);
@@ -446,6 +534,30 @@ impl ClientConnection {
         }
 
         Ok(())
+    }
+
+    /// Cancel all pending transfers for the given device handles
+    ///
+    /// Returns the number of transfers cancelled. Each pending transfer will
+    /// receive a cancellation signal and respond with UsbError::NoDevice.
+    async fn cancel_pending_transfers(&self, handles: &[DeviceHandle]) -> usize {
+        let mut cancelled = 0;
+        let mut pending_map = self.pending_transfers.lock().await;
+
+        for handle in handles {
+            if let Some(transfers) = pending_map.remove(handle) {
+                for transfer in transfers {
+                    debug!(
+                        "Cancelling pending transfer {:?} for device {:?}",
+                        transfer.request_id, handle
+                    );
+                    let _ = transfer.cancel_tx.send(());
+                    cancelled += 1;
+                }
+            }
+        }
+
+        cancelled
     }
 
     /// Keep-alive task: sends periodic pings
@@ -501,6 +613,18 @@ impl ClientConnection {
 
     /// Cleanup when connection closes
     async fn cleanup(&mut self) {
+        // Cancel all pending transfers first
+        let handles: Vec<DeviceHandle> = self.attached_devices.keys().copied().collect();
+        if !handles.is_empty() {
+            let cancelled = self.cancel_pending_transfers(&handles).await;
+            if cancelled > 0 {
+                info!(
+                    "Cancelled {} pending transfers during cleanup for {}",
+                    cancelled, self.endpoint_id
+                );
+            }
+        }
+
         if self.attached_devices.is_empty() {
             return;
         }

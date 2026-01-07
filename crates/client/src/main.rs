@@ -12,9 +12,14 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use common::setup_logging;
 use iroh::PublicKey as EndpointId;
-use network::{ClientConfig as NetworkClientConfig, DeviceNotification, IrohClient};
+use network::{
+    ClientConfig as NetworkClientConfig, DeviceNotification, IrohClient, ReconciliationResult,
+};
+use protocol::DeviceId;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::signal;
+use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 use virtual_usb::VirtualUsbManager;
 
@@ -118,6 +123,9 @@ async fn main() -> Result<()> {
     );
     info!("Virtual USB Manager initialized");
 
+    // Set up reconciliation callback for handling reconnection
+    setup_reconciliation_callback(&client, virtual_usb.clone()).await;
+
     // Handle specific connection request or run TUI
     let result = if let Some(server_id_str) = args.connect {
         connect_and_run(client, virtual_usb.clone(), &server_id_str, &config, args.headless).await
@@ -178,6 +186,10 @@ async fn connect_and_run(
 
     info!("Successfully connected to server");
 
+    // Track previously attached devices for auto-reattach
+    let previously_attached: Arc<RwLock<HashSet<DeviceId>>> =
+        Arc::new(RwLock::new(HashSet::new()));
+
     // List available devices and attach them as virtual USB devices
     match client.list_remote_devices(server_id).await {
         Ok(devices) => {
@@ -204,14 +216,16 @@ async fn connect_and_run(
                     {
                         Ok(device_proxy) => match virtual_usb.attach_device(device_proxy).await {
                             Ok(handle) => {
-                                info!("  ✓ Attached as virtual USB device (handle: {})", handle.0);
+                                info!("  [ok] Attached as virtual USB device (handle: {})", handle.0);
+                                // Track this device for auto-reattach
+                                previously_attached.write().await.insert(device.id);
                             }
                             Err(e) => {
-                                warn!("  ✗ Failed to attach virtual device: {:#}", e);
+                                warn!("  [error] Failed to attach virtual device: {:#}", e);
                             }
                         },
                         Err(e) => {
-                            warn!("  ✗ Failed to create device proxy: {:#}", e);
+                            warn!("  [error] Failed to create device proxy: {:#}", e);
                         }
                     }
                 }
@@ -225,7 +239,15 @@ async fn connect_and_run(
     // Subscribe to device notifications from server
     if let Some(notification_rx) = client.subscribe_notifications(server_id).await {
         let virtual_usb_clone = virtual_usb.clone();
-        tokio::spawn(handle_notifications(notification_rx, virtual_usb_clone));
+        let client_clone = client.clone();
+        let previously_attached_clone = previously_attached.clone();
+        tokio::spawn(handle_notifications(
+            notification_rx,
+            virtual_usb_clone,
+            client_clone,
+            server_id,
+            previously_attached_clone,
+        ));
         info!("Subscribed to device notifications from server");
     } else {
         warn!("Failed to subscribe to device notifications (connection may be closed)");
@@ -277,6 +299,9 @@ async fn run_tui_mode(
 async fn handle_notifications(
     mut notification_rx: tokio::sync::broadcast::Receiver<DeviceNotification>,
     virtual_usb: Arc<VirtualUsbManager>,
+    client: Arc<IrohClient>,
+    server_id: EndpointId,
+    previously_attached: Arc<RwLock<HashSet<DeviceId>>>,
 ) {
     loop {
         match notification_rx.recv().await {
@@ -285,6 +310,41 @@ async fn handle_notifications(
                     "Device arrived on server: {:?} ({:04x}:{:04x})",
                     device.id, device.vendor_id, device.product_id
                 );
+
+                // Check if this device was previously attached
+                let was_attached = previously_attached.read().await.contains(&device.id);
+                if was_attached {
+                    info!(
+                        "Auto-reattaching previously attached device {:?} ({:04x}:{:04x})",
+                        device.id, device.vendor_id, device.product_id
+                    );
+
+                    // Attempt to re-attach the device
+                    match IrohClient::create_device_proxy(client.clone(), server_id, device.clone())
+                        .await
+                    {
+                        Ok(device_proxy) => match virtual_usb.attach_device(device_proxy).await {
+                            Ok(handle) => {
+                                info!(
+                                    "Auto-reattach successful for device {:?} (handle: {})",
+                                    device.id, handle.0
+                                );
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "Auto-reattach failed for device {:?}: {:#}",
+                                    device.id, e
+                                );
+                            }
+                        },
+                        Err(e) => {
+                            warn!(
+                                "Failed to create device proxy for auto-reattach {:?}: {:#}",
+                                device.id, e
+                            );
+                        }
+                    }
+                }
             }
             Ok(DeviceNotification::DeviceRemoved {
                 device_id,
@@ -292,6 +352,17 @@ async fn handle_notifications(
                 reason,
             }) => {
                 info!("Device {:?} removed from server: {:?}", device_id, reason);
+
+                // Track this device for potential auto-reattach when it returns
+                // (it was attached if we had handles for it)
+                if !invalidated_handles.is_empty() {
+                    previously_attached.write().await.insert(device_id);
+                    debug!(
+                        "Device {:?} added to previously_attached for auto-reattach",
+                        device_id
+                    );
+                }
+
                 if let Err(e) = virtual_usb
                     .handle_device_removed(device_id, invalidated_handles)
                     .await
@@ -308,4 +379,90 @@ async fn handle_notifications(
             }
         }
     }
+}
+
+/// Set up the reconciliation callback for handling device state after reconnection
+///
+/// This callback is invoked after successful reconnection to a server.
+/// It compares the server's current device list with locally attached devices
+/// and cleans up any stale local state.
+async fn setup_reconciliation_callback(client: &Arc<IrohClient>, virtual_usb: Arc<VirtualUsbManager>) {
+    let virtual_usb_clone = virtual_usb.clone();
+
+    let callback: network::ReconciliationCallback = Arc::new(move |server_id, server_devices| {
+        let virtual_usb = virtual_usb_clone.clone();
+
+        Box::pin(async move {
+            reconcile_devices(server_id, server_devices, &virtual_usb).await
+        })
+    });
+
+    client.set_reconciliation_callback(callback).await;
+}
+
+/// Reconcile local device state with server's current device list
+///
+/// After a reconnection, devices may have been removed from the server
+/// while we were disconnected. This function:
+/// 1. Gets the list of devices currently on the server
+/// 2. Compares with locally attached virtual devices
+/// 3. Detaches any local devices that no longer exist on the server
+async fn reconcile_devices(
+    server_id: EndpointId,
+    server_devices: Vec<protocol::DeviceInfo>,
+    virtual_usb: &VirtualUsbManager,
+) -> Result<ReconciliationResult> {
+    info!(
+        "Reconciling devices for server {}: {} devices on server",
+        server_id,
+        server_devices.len()
+    );
+
+    // Build set of device IDs currently on server
+    let server_device_ids: HashSet<DeviceId> = server_devices.iter().map(|d| d.id).collect();
+
+    // Get locally attached devices
+    let local_device_info = virtual_usb.get_attached_device_info().await;
+
+    debug!(
+        "Local attached devices: {}, Server devices: {}",
+        local_device_info.len(),
+        server_device_ids.len()
+    );
+
+    let mut result = ReconciliationResult::default();
+
+    // Find devices that are locally attached but no longer on server
+    for (handle, device_id) in local_device_info {
+        if !server_device_ids.contains(&device_id) {
+            info!(
+                "Device {:?} (handle {}) no longer on server, detaching local virtual device",
+                device_id, handle.0
+            );
+
+            match virtual_usb.detach_device(handle).await {
+                Ok(()) => {
+                    info!("Successfully detached stale device {:?}", device_id);
+                    result.detached_count += 1;
+                }
+                Err(e) => {
+                    warn!("Failed to detach stale device {:?}: {}", device_id, e);
+                    result.failed_device_ids.push(device_id);
+                }
+            }
+        } else {
+            debug!(
+                "Device {:?} (handle {}) still exists on server",
+                device_id, handle.0
+            );
+        }
+    }
+
+    info!(
+        "Reconciliation complete: {} devices detached, {} failures",
+        result.detached_count,
+        result.failed_device_ids.len()
+    );
+
+    Ok(result)
 }

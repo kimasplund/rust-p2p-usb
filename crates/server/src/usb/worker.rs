@@ -41,7 +41,8 @@ impl UsbWorkerThread {
     /// This is the main loop that:
     /// 1. Checks for incoming commands from Tokio (non-blocking)
     /// 2. Processes USB events (with timeout)
-    /// 3. Handles hot-plug notifications
+    /// 3. Handles hot-plug notifications (debounced)
+    /// 4. Processes any ready debounced events
     ///
     /// The loop continues until a Shutdown command is received.
     pub fn run(mut self) -> Result<(), rusb::Error> {
@@ -82,6 +83,10 @@ impl UsbWorkerThread {
                     std::thread::sleep(Duration::from_millis(100));
                 }
             }
+
+            // Process any debounced hotplug events that are ready to fire
+            // This handles events after their 500ms debounce period has elapsed
+            self.manager.process_debounced_events();
         }
 
         info!("USB worker thread stopped");

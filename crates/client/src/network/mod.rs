@@ -8,5 +8,7 @@ pub mod device_proxy;
 pub mod session;
 
 // Re-export public types
-pub use client::{ClientConfig, ConnectionState, IrohClient};
+pub use client::{
+    ClientConfig, ConnectionState, IrohClient, ReconciliationCallback, ReconciliationResult,
+};
 pub use connection::DeviceNotification;

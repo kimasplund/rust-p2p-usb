@@ -7,7 +7,9 @@ use common::{ALPN_PROTOCOL, load_or_generate_secret_key};
 use iroh::{Endpoint, EndpointAddr, PublicKey as EndpointId};
 use protocol::{DeviceId, DeviceInfo};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, broadcast};
 use tokio::time::{Duration, sleep};
@@ -15,6 +17,30 @@ use tracing::{debug, error, info, warn};
 
 use super::connection::{DeviceNotification, ServerConnection};
 use super::device_proxy::DeviceProxy;
+
+/// Type alias for reconciliation callback
+///
+/// Called after successful reconnection with server devices and server ID.
+/// The callback should compare with local state and clean up stale devices.
+pub type ReconciliationCallback = Arc<
+    dyn Fn(
+            EndpointId,
+            Vec<DeviceInfo>,
+        ) -> Pin<Box<dyn Future<Output = Result<ReconciliationResult>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Result of a reconciliation operation after reconnection
+#[derive(Debug, Clone, Default)]
+pub struct ReconciliationResult {
+    /// Number of stale devices that were detached
+    pub detached_count: usize,
+    /// Number of devices that were re-attached
+    pub reattached_count: usize,
+    /// Device IDs that failed to reconcile
+    pub failed_device_ids: Vec<DeviceId>,
+}
 
 /// Connection state for a server
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,7 +103,6 @@ pub struct IrohClient {
     /// Allowed server EndpointIds (empty = allow all)
     allowed_servers: Arc<RwLock<HashSet<EndpointId>>>,
     /// Active server connections
-    /// Active server connections
     connections: Arc<Mutex<HashMap<EndpointId, ServerConnection>>>,
     /// Connection state updates
     state_updates: broadcast::Sender<(EndpointId, ConnectionState)>,
@@ -85,6 +110,8 @@ pub struct IrohClient {
     notification_updates: broadcast::Sender<(EndpointId, DeviceNotification)>,
     /// Target servers we want to maintain connections to
     target_servers: Arc<RwLock<HashSet<EndpointId>>>,
+    /// Optional callback for reconciliation after reconnection
+    reconciliation_callback: Arc<RwLock<Option<ReconciliationCallback>>>,
 }
 
 /// Client configuration
@@ -152,6 +179,7 @@ impl IrohClient {
         let (state_updates, _) = broadcast::channel(32);
         let (notification_updates, _) = broadcast::channel(128); // Larger buffer for notifications
         let target_servers = Arc::new(RwLock::new(HashSet::new()));
+        let reconciliation_callback = Arc::new(RwLock::new(None));
 
         let client = Self {
             endpoint,
@@ -160,6 +188,7 @@ impl IrohClient {
             state_updates,
             notification_updates,
             target_servers,
+            reconciliation_callback,
         };
 
         // Start background connection monitor
@@ -174,6 +203,7 @@ impl IrohClient {
         let connections = self.connections.clone();
         let target_servers = self.target_servers.clone();
         let state_updates = self.state_updates.clone();
+        let reconciliation_callback = self.reconciliation_callback.clone();
 
         tokio::spawn(async move {
             info!("Connection monitor started");
@@ -213,15 +243,18 @@ impl IrohClient {
 
                         info!("Attempting reconnection to {}...", server_id);
 
-                        // Try to connect
-                        // We need to use the client instance to access setup_connection
-                        // Since IrohClient expects &self for setup_connection, and we are in a task
-                        // We rely on the fact that we can call methods on the captured client clone if we had one.
-                        // But wait, setup_connection is an instance method.
-
                         match client.setup_connection(*server_id, None).await {
                             Ok(conn) => {
                                 info!("Reconnected to {}!", server_id);
+
+                                // Perform reconciliation after successful reconnection
+                                Self::perform_reconciliation(
+                                    &conn,
+                                    *server_id,
+                                    &reconciliation_callback,
+                                )
+                                .await;
+
                                 {
                                     let mut conns = connections.lock().await;
                                     conns.insert(*server_id, conn);
@@ -263,6 +296,107 @@ impl IrohClient {
         &self,
     ) -> broadcast::Receiver<(EndpointId, DeviceNotification)> {
         self.notification_updates.subscribe()
+    }
+
+    /// Set a callback to be called after successful reconnection for reconciliation
+    ///
+    /// The callback receives the server EndpointId and the current list of devices
+    /// on that server. It should compare with local state and clean up any stale
+    /// devices that no longer exist on the server.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let virtual_usb = Arc::new(VirtualUsbManager::new().await?);
+    /// let virtual_usb_clone = virtual_usb.clone();
+    ///
+    /// client.set_reconciliation_callback(Arc::new(move |server_id, server_devices| {
+    ///     let virtual_usb = virtual_usb_clone.clone();
+    ///     Box::pin(async move {
+    ///         // Compare server_devices with locally attached devices
+    ///         // and detach any that no longer exist on server
+    ///         reconcile_devices(server_id, server_devices, &virtual_usb).await
+    ///     })
+    /// })).await;
+    /// ```
+    pub async fn set_reconciliation_callback(&self, callback: ReconciliationCallback) {
+        let mut guard = self.reconciliation_callback.write().await;
+        *guard = Some(callback);
+        info!("Reconciliation callback registered");
+    }
+
+    /// Clear the reconciliation callback
+    #[allow(dead_code)]
+    pub async fn clear_reconciliation_callback(&self) {
+        let mut guard = self.reconciliation_callback.write().await;
+        *guard = None;
+        debug!("Reconciliation callback cleared");
+    }
+
+    /// Perform reconciliation after successful reconnection
+    ///
+    /// Fetches the current device list from the server and invokes the
+    /// reconciliation callback if one is registered.
+    async fn perform_reconciliation(
+        conn: &ServerConnection,
+        server_id: EndpointId,
+        callback: &Arc<RwLock<Option<ReconciliationCallback>>>,
+    ) {
+        // Check if callback is registered
+        let callback_opt = {
+            let guard = callback.read().await;
+            guard.clone()
+        };
+
+        let Some(callback_fn) = callback_opt else {
+            debug!(
+                "No reconciliation callback registered, skipping reconciliation for {}",
+                server_id
+            );
+            return;
+        };
+
+        info!("Starting reconciliation for server {}", server_id);
+
+        // Fetch current device list from server
+        match conn.list_devices().await {
+            Ok(server_devices) => {
+                debug!(
+                    "Server {} has {} devices available",
+                    server_id,
+                    server_devices.len()
+                );
+
+                // Invoke the reconciliation callback
+                match callback_fn(server_id, server_devices).await {
+                    Ok(result) => {
+                        info!(
+                            "Reconciliation complete for {}: detached={}, reattached={}, failed={}",
+                            server_id,
+                            result.detached_count,
+                            result.reattached_count,
+                            result.failed_device_ids.len()
+                        );
+
+                        if !result.failed_device_ids.is_empty() {
+                            warn!(
+                                "Failed to reconcile devices: {:?}",
+                                result.failed_device_ids
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        error!("Reconciliation callback failed for {}: {}", server_id, e);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to fetch device list from {} for reconciliation: {}",
+                    server_id, e
+                );
+            }
+        }
     }
 
     /// Get the client's EndpointId

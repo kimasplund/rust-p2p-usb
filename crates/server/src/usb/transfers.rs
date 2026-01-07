@@ -154,12 +154,12 @@ fn execute_bulk_transfer(
                 buffer.truncate(len);
                 Ok(buffer)
             }
-            Err(rusb::Error::Timeout) => {
-                // For bulk IN, timeout is normal - device has no data available
+            Err(rusb::Error::Timeout) | Err(rusb::Error::Io) => {
+                // For bulk IN, timeout/IO error is normal - device has no data available
                 // Return empty success instead of error to avoid breaking USB/IP clients
-                // This is common for printer status endpoints when no status is pending
+                // Printers often return IO error when no status data is pending
                 debug!(
-                    "Bulk IN timeout on endpoint {:#x} - returning empty (no data available)",
+                    "Bulk IN timeout/io on endpoint {:#x} - returning empty (no data available)",
                     endpoint
                 );
                 Ok(Vec::new())
@@ -197,15 +197,24 @@ fn execute_interrupt_transfer(
     data: Vec<u8>,
     timeout_ms: u32,
 ) -> TransferResult {
+    let is_in = (endpoint & 0x80) != 0;
+
+    // For interrupt IN transfers (like printer status reads), use a short timeout
+    // since the device may not have data available. This prevents blocking
+    // and allows USB/IP clients to continue without long waits.
+    let timeout = if is_in {
+        Duration::from_millis(100.min(timeout_ms as u64))
+    } else {
+        Duration::from_millis(timeout_ms as u64)
+    };
+
     debug!(
-        "Interrupt transfer: endpoint={:#x}, data_len={}, timeout={}ms",
+        "Interrupt transfer: endpoint={:#x}, data_len={}, timeout={}ms, is_in={}",
         endpoint,
         data.len(),
-        timeout_ms
+        timeout.as_millis(),
+        is_in
     );
-
-    let timeout = Duration::from_millis(timeout_ms as u64);
-    let is_in = (endpoint & 0x80) != 0;
 
     let result = if is_in {
         // IN transfer: read from device
@@ -214,6 +223,16 @@ fn execute_interrupt_transfer(
             Ok(len) => {
                 buffer.truncate(len);
                 Ok(buffer)
+            }
+            Err(rusb::Error::Timeout) | Err(rusb::Error::Io) => {
+                // For interrupt IN, timeout/IO error is normal - device has no data available
+                // Return empty success instead of error to avoid breaking USB/IP clients
+                // Printers often return IO error when no status data is pending
+                debug!(
+                    "Interrupt IN timeout/io on endpoint {:#x} - returning empty (no data available)",
+                    endpoint
+                );
+                Ok(Vec::new())
             }
             Err(e) => Err(map_rusb_error(e)),
         }

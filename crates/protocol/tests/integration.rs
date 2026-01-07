@@ -897,10 +897,7 @@ fn test_decode_framed_huge_length_prefix() {
     let result = decode_framed(&huge_len);
     assert!(result.is_err());
     // Should be FrameTooLarge error
-    assert!(matches!(
-        result,
-        Err(ProtocolError::FrameTooLarge { .. })
-    ));
+    assert!(matches!(result, Err(ProtocolError::FrameTooLarge { .. })));
 }
 
 #[test]
@@ -932,16 +929,25 @@ fn test_decode_framed_extra_trailing_bytes() {
 fn test_decode_invalid_utf8_in_string() {
     // Try to decode bytes that would contain invalid UTF-8 in string fields
     // This tests postcard's handling of string deserialization
-    let invalid_utf8: [u8; 20] = [
-        0x01, 0x00, 0x00, // Version bytes
-        0x0A, // Some payload discriminant
+    // Note: This uses the Error message variant which has discriminant 0x0C (12)
+    // and contains a String field. The format is:
+    // - 3 bytes version (1.0.0)
+    // - 1 byte discriminant (Error = 0x0C)
+    // - varint string length
+    // - string bytes (invalid UTF-8)
+    let invalid_utf8: [u8; 12] = [
+        0x01, 0x00, 0x00, // Version bytes (1.0.0)
+        0x0C,             // Error variant discriminant (index 12)
+        0x04,             // String length (4 bytes)
         0xFF, 0xFE, 0x80, 0x81, // Invalid UTF-8 bytes
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, // Padding
     ];
 
     let result = decode_message(&invalid_utf8);
-    // Should fail to deserialize
-    assert!(result.is_err());
+    // Should fail to deserialize due to invalid UTF-8
+    // Note: If this test fails, the Error variant discriminant may have changed
+    // Check MessagePayload enum order and update discriminant accordingly
+    assert!(result.is_err(), "decode_message should fail on invalid UTF-8");
 }
 
 #[test]
@@ -1014,12 +1020,12 @@ fn test_mock_request_response_flow() {
 
     // "Server" receives and decodes request
     let server_received = decode_framed(&request_bytes).expect("Failed to decode");
-    let device_id = if let MessagePayload::AttachDeviceRequest { device_id } = server_received.payload
-    {
-        device_id
-    } else {
-        panic!("Expected AttachDeviceRequest");
-    };
+    let device_id =
+        if let MessagePayload::AttachDeviceRequest { device_id } = server_received.payload {
+            device_id
+        } else {
+            panic!("Expected AttachDeviceRequest");
+        };
     assert_eq!(device_id.0, 42);
 
     // "Server" sends response

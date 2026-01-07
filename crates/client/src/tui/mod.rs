@@ -22,6 +22,7 @@
 
 pub mod app;
 pub mod events;
+pub mod qr;
 pub mod ui;
 
 use anyhow::{Context, Result};
@@ -43,7 +44,7 @@ use crate::network::ConnectionState;
 use crate::network::IrohClient;
 use crate::virtual_usb::{GlobalDeviceId, VirtualUsbManager};
 
-pub use app::{App, AppAction, DeviceStatus, ServerStatus};
+pub use app::{App, AppAction, DeviceStatus, ServerStatus, Toast, ToastType};
 pub use events::EventHandler;
 
 /// Messages sent from async tasks to the TUI
@@ -65,6 +66,8 @@ pub enum TuiMessage {
     DeviceDetached(EndpointId, protocol::DeviceHandle),
     /// Status message
     StatusMessage(String),
+    /// Health metrics update for a server
+    HealthUpdate(EndpointId, crate::network::HealthMetrics),
 }
 
 /// TUI runner that manages the terminal and event loop
@@ -141,6 +144,12 @@ impl TuiRunner {
         // Subscribe to device notifications
         let mut notification_rx = self.client.subscribe_all_notifications();
 
+        // Spawn health metrics update task
+        self.spawn_health_update_task();
+
+        // Create health update interval (every 2 seconds for UI responsiveness)
+        let mut health_interval = tokio::time::interval(std::time::Duration::from_secs(2));
+
         loop {
             tokio::select! {
                 // Handle connection state updates
@@ -156,6 +165,9 @@ impl TuiRunner {
                         }
                         DeviceNotification::DeviceRemoved { device_id, .. } => {
                              self.handle_action(AppAction::DeviceRemoved(endpoint_id, device_id)).await?;
+                        }
+                        DeviceNotification::DeviceStatusChanged { device_id, device_info, .. } => {
+                             self.handle_action(AppAction::DeviceStatusChanged(endpoint_id, device_id, device_info)).await?;
                         }
                     }
                 }
@@ -177,6 +189,13 @@ impl TuiRunner {
                     // Handle the action
                     self.handle_action(action).await?;
                 }
+                // Periodic health metrics update (inline to avoid async borrowing issues)
+                _ = health_interval.tick() => {
+                    let metrics = self.client.get_all_health_metrics().await;
+                    for (endpoint_id, health) in metrics {
+                        self.app.update_server_health(&endpoint_id, health);
+                    }
+                }
                 else => break, // Channels closed
             }
 
@@ -185,12 +204,38 @@ impl TuiRunner {
                 break;
             }
 
+            // Cleanup expired toasts
+            self.app.cleanup_toasts();
+
             // Render
             self.terminal.draw(|f| ui::render(f, &self.app))?;
         }
 
         info!("TUI shutting down");
         Ok(())
+    }
+
+    /// Spawn a background task that periodically fetches health metrics
+    fn spawn_health_update_task(&self) {
+        let client = self.client.clone();
+        let tx = self.message_tx.clone();
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                let metrics = client.get_all_health_metrics().await;
+                for (endpoint_id, health) in metrics {
+                    if tx
+                        .send(TuiMessage::HealthUpdate(endpoint_id, health))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        });
     }
 
     /// Handle TUI message from async task
@@ -250,6 +295,9 @@ impl TuiRunner {
             TuiMessage::StatusMessage(msg) => {
                 self.app.set_status(msg);
             }
+            TuiMessage::HealthUpdate(endpoint_id, health) => {
+                self.app.update_server_health(&endpoint_id, health);
+            }
         }
     }
 
@@ -273,6 +321,10 @@ impl TuiRunner {
             }
             AppAction::DeviceRemoved(endpoint_id, device_id) => {
                 self.app.remove_device(&endpoint_id, device_id);
+            }
+            AppAction::DeviceStatusChanged(endpoint_id, device_id, device_info) => {
+                self.app
+                    .update_device_info(&endpoint_id, device_id, device_info);
             }
             AppAction::AttachDevice(endpoint_id, device_id) => {
                 self.app.update_device_status(

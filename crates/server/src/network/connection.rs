@@ -16,9 +16,11 @@ use protocol::{
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 use tokio::time;
 use tracing::{debug, error, info, trace, warn};
+
+use crate::audit::{AuditResult, SharedAuditLogger};
 
 /// Timeout for receiving messages (2 minutes)
 const MESSAGE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -57,11 +59,18 @@ pub struct ClientConnection {
     last_activity: Instant,
     /// Client supports push notifications (determined during capability exchange)
     client_supports_push: bool,
+    /// Audit logger for compliance logging
+    audit_logger: SharedAuditLogger,
 }
 
 impl ClientConnection {
     /// Create a new client connection handler
-    pub fn new(endpoint_id: EndpointId, connection: Connection, usb_bridge: UsbBridge) -> Self {
+    pub fn new(
+        endpoint_id: EndpointId,
+        connection: Connection,
+        usb_bridge: UsbBridge,
+        audit_logger: SharedAuditLogger,
+    ) -> Self {
         Self {
             endpoint_id,
             connection,
@@ -70,6 +79,7 @@ impl ClientConnection {
             pending_transfers: Arc::new(Mutex::new(HashMap::new())),
             last_activity: Instant::now(),
             client_supports_push: false,
+            audit_logger,
         }
     }
 
@@ -256,6 +266,43 @@ impl ClientConnection {
                 Ok(MessagePayload::Pong)
             }
 
+            MessagePayload::Heartbeat {
+                sequence,
+                timestamp_ms,
+            } => {
+                debug!(
+                    "Heartbeat from {}: seq={}, timestamp={}",
+                    self.endpoint_id, sequence, timestamp_ms
+                );
+                self.last_activity = Instant::now();
+
+                // Get current server timestamp
+                let server_timestamp_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+
+                Ok(MessagePayload::HeartbeatAck {
+                    sequence,
+                    client_timestamp_ms: timestamp_ms,
+                    server_timestamp_ms,
+                })
+            }
+
+            MessagePayload::GetSharingStatusRequest { device_id } => {
+                self.handle_get_sharing_status(device_id).await
+            }
+
+            MessagePayload::LockDeviceRequest {
+                handle,
+                write_access,
+                timeout_secs: _,
+            } => self.handle_lock_device(handle, write_access).await,
+
+            MessagePayload::UnlockDeviceRequest { handle } => {
+                self.handle_unlock_device(handle).await
+            }
+
             _ => {
                 warn!("Unexpected message type: {:?}", payload);
                 Ok(MessagePayload::Error {
@@ -301,13 +348,41 @@ impl ClientConnection {
         // Wait for response
         let result = rx.await?;
 
-        // Track attached device
-        if let Ok(handle) = result {
-            self.attached_devices.insert(handle, device_id);
-            info!(
-                "Device attached: handle={:?}, device={:?}",
-                handle, device_id
-            );
+        // Track attached device and audit log
+        let endpoint_id_str = self.endpoint_id.to_string();
+        match &result {
+            Ok(handle) => {
+                self.attached_devices.insert(*handle, device_id);
+                info!(
+                    "Device attached: handle={:?}, device={:?}",
+                    handle, device_id
+                );
+
+                // Audit log: successful attach
+                if let Some(ref logger) = *self.audit_logger {
+                    logger.log_device_attach(
+                        &endpoint_id_str,
+                        device_id,
+                        Some(*handle),
+                        None,
+                        AuditResult::Success,
+                        None,
+                    );
+                }
+            }
+            Err(e) => {
+                // Audit log: failed attach
+                if let Some(ref logger) = *self.audit_logger {
+                    logger.log_device_attach(
+                        &endpoint_id_str,
+                        device_id,
+                        None,
+                        None,
+                        AuditResult::Failure,
+                        Some(format!("{:?}", e)),
+                    );
+                }
+            }
         }
 
         Ok(MessagePayload::AttachDeviceResponse { result })
@@ -319,6 +394,9 @@ impl ClientConnection {
             "Detach device request: {:?} from {}",
             handle, self.endpoint_id
         );
+
+        // Get device_id before we remove it from tracking
+        let device_id = self.attached_devices.get(&handle).copied();
 
         // Send command to USB subsystem
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -332,10 +410,33 @@ impl ClientConnection {
         // Wait for response
         let result = rx.await?;
 
-        // Remove from tracked devices
+        // Remove from tracked devices and audit log
+        let endpoint_id_str = self.endpoint_id.to_string();
         if result.is_ok() {
             self.attached_devices.remove(&handle);
             info!("Device detached: handle={:?}", handle);
+
+            // Audit log: successful detach
+            if let Some(ref logger) = *self.audit_logger {
+                logger.log_device_detach(
+                    &endpoint_id_str,
+                    handle,
+                    device_id,
+                    AuditResult::Success,
+                    None,
+                );
+            }
+        } else {
+            // Audit log: failed detach
+            if let Some(ref logger) = *self.audit_logger {
+                logger.log_device_detach(
+                    &endpoint_id_str,
+                    handle,
+                    device_id,
+                    AuditResult::Failure,
+                    result.as_ref().err().map(|e| format!("{:?}", e)),
+                );
+            }
         }
 
         Ok(MessagePayload::DetachDeviceResponse { result })
@@ -424,6 +525,101 @@ impl ClientConnection {
         Ok(MessagePayload::TransferComplete { response })
     }
 
+    /// Handle GetSharingStatusRequest
+    async fn handle_get_sharing_status(&self, device_id: DeviceId) -> Result<MessagePayload> {
+        debug!(
+            "Get sharing status request: {:?} from {}",
+            device_id, self.endpoint_id
+        );
+
+        // Find the handle for this device if attached
+        let handle = self
+            .attached_devices
+            .iter()
+            .find(|(_, id)| **id == device_id)
+            .map(|(h, _)| *h);
+
+        // Send command to USB subsystem
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.usb_bridge
+            .send_command(UsbCommand::GetSharingStatus {
+                device_id,
+                handle,
+                response: tx,
+            })
+            .await?;
+
+        // Wait for response
+        let result = rx.await?;
+
+        Ok(MessagePayload::GetSharingStatusResponse { result })
+    }
+
+    /// Handle LockDeviceRequest
+    async fn handle_lock_device(
+        &self,
+        handle: DeviceHandle,
+        write_access: bool,
+    ) -> Result<MessagePayload> {
+        info!(
+            "Lock device request: {:?} (write={}) from {}",
+            handle, write_access, self.endpoint_id
+        );
+
+        // Verify device is attached
+        if !self.attached_devices.contains_key(&handle) {
+            return Ok(MessagePayload::LockDeviceResponse {
+                result: protocol::LockResult::NotAvailable {
+                    reason: "Device not attached".to_string(),
+                },
+            });
+        }
+
+        // Send command to USB subsystem
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.usb_bridge
+            .send_command(UsbCommand::LockDevice {
+                handle,
+                write_access,
+                response: tx,
+            })
+            .await?;
+
+        // Wait for response
+        let result = rx.await?;
+
+        Ok(MessagePayload::LockDeviceResponse { result })
+    }
+
+    /// Handle UnlockDeviceRequest
+    async fn handle_unlock_device(&self, handle: DeviceHandle) -> Result<MessagePayload> {
+        info!(
+            "Unlock device request: {:?} from {}",
+            handle, self.endpoint_id
+        );
+
+        // Verify device is attached
+        if !self.attached_devices.contains_key(&handle) {
+            return Ok(MessagePayload::UnlockDeviceResponse {
+                result: protocol::UnlockResult::NotHeld,
+            });
+        }
+
+        // Send command to USB subsystem
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.usb_bridge
+            .send_command(UsbCommand::UnlockDevice {
+                handle,
+                response: tx,
+            })
+            .await?;
+
+        // Wait for response
+        let result = rx.await?;
+
+        Ok(MessagePayload::UnlockDeviceResponse { result })
+    }
+
     /// Send a push notification via unidirectional QUIC stream
     async fn send_push_notification(&self, payload: MessagePayload) -> Result<()> {
         if !self.client_supports_push {
@@ -477,8 +673,7 @@ impl ClientConnection {
                 );
 
                 // Cancel all pending transfers for invalidated handles
-                let cancelled_count =
-                    self.cancel_pending_transfers(&invalidated_handles).await;
+                let cancelled_count = self.cancel_pending_transfers(&invalidated_handles).await;
                 if cancelled_count > 0 {
                     info!(
                         "Cancelled {} pending transfers for device {:?}",
@@ -529,6 +724,88 @@ impl ClientConnection {
                     .await
                 {
                     warn!("Failed to send device removed notification: {:#}", e);
+                }
+            }
+
+            UsbEvent::DeviceAvailable {
+                device_id,
+                handle,
+                client_id,
+                sharing_mode,
+            } => {
+                // Only notify if this is our client
+                if client_id == self.endpoint_id.to_string() {
+                    info!(
+                        "Device {:?} became available for client {} with handle {:?}",
+                        device_id, client_id, handle
+                    );
+
+                    if let Err(e) = self
+                        .send_push_notification(MessagePayload::DeviceAvailableNotification {
+                            device_id,
+                            handle,
+                            sharing_mode,
+                        })
+                        .await
+                    {
+                        warn!("Failed to send device available notification: {:#}", e);
+                    }
+                }
+            }
+
+            UsbEvent::QueuePositionChanged {
+                device_id,
+                handle,
+                client_id,
+                new_position,
+            } => {
+                // Only notify if this is our client
+                if client_id == self.endpoint_id.to_string() {
+                    debug!(
+                        "Queue position changed for client {} on device {:?}: position={}",
+                        client_id, device_id, new_position
+                    );
+
+                    if let Err(e) = self
+                        .send_push_notification(MessagePayload::QueuePositionNotification {
+                            update: protocol::QueuePositionUpdate {
+                                device_id,
+                                position: new_position,
+                                queue_length: 0, // Unknown at notification time
+                            },
+                        })
+                        .await
+                    {
+                        warn!("Failed to send queue position notification: {:#}", e);
+                    }
+                }
+            }
+
+            UsbEvent::LockExpired {
+                device_id,
+                handle,
+                client_id,
+            } => {
+                // Only notify if this is our client
+                if client_id == self.endpoint_id.to_string() {
+                    info!(
+                        "Lock expired for client {} on device {:?} (handle {:?})",
+                        client_id, device_id, handle
+                    );
+
+                    // Notify client that their lock has expired
+                    if let Err(e) = self
+                        .send_push_notification(MessagePayload::DeviceStatusChangedNotification {
+                            device_id,
+                            device_info: None,
+                            reason: protocol::DeviceStatusChangeReason::SharingStatusChanged {
+                                shared: true,
+                            },
+                        })
+                        .await
+                    {
+                        warn!("Failed to send lock expired notification: {:#}", e);
+                    }
                 }
             }
         }

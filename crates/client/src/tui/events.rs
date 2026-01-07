@@ -60,6 +60,7 @@ impl EventHandler {
             InputMode::AddServer { .. } => self.handle_add_server_mode(app, key),
             InputMode::Help => self.handle_help_mode(app, key),
             InputMode::ConfirmQuit => self.handle_confirm_quit_mode(app, key),
+            InputMode::QrCode => self.handle_qr_code_mode(app, key),
         }
     }
 
@@ -100,6 +101,12 @@ impl EventHandler {
             // Help
             KeyCode::Char('?') => {
                 app.show_help();
+                AppAction::None
+            }
+
+            // QR Code (uppercase Q)
+            KeyCode::Char('Q') => {
+                app.show_qr_code();
                 AppAction::None
             }
 
@@ -149,6 +156,17 @@ impl EventHandler {
                 AppAction::Quit
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                app.cancel_input();
+                AppAction::None
+            }
+            _ => AppAction::None,
+        }
+    }
+
+    /// Handle key events in QR code display mode
+    fn handle_qr_code_mode(&self, app: &mut App, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('Q') | KeyCode::Enter | KeyCode::Char('q') => {
                 app.cancel_input();
                 AppAction::None
             }

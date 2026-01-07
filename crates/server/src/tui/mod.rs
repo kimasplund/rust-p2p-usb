@@ -41,6 +41,7 @@
 
 pub mod app;
 pub mod events;
+pub mod qr;
 pub mod ui;
 
 // Re-export main types for external use

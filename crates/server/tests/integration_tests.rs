@@ -11,7 +11,7 @@
 //! Run with: `cargo test -p server --test integration_tests`
 
 use common::test_utils::{
-    create_mock_device_info, create_mock_device_list, with_timeout, DEFAULT_TEST_TIMEOUT,
+    DEFAULT_TEST_TIMEOUT, create_mock_device_info, create_mock_device_list, with_timeout,
 };
 use common::{UsbCommand, UsbEvent, create_usb_bridge};
 use protocol::{
@@ -20,8 +20,8 @@ use protocol::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use tempfile::tempdir;
 
@@ -262,7 +262,9 @@ async fn test_usb_bridge_attach_device_flow() {
         {
             assert_eq!(device_id.0, 42);
             assert!(!client_id.is_empty());
-            response.send(Ok(DeviceHandle(100))).expect("Failed to send");
+            response
+                .send(Ok(DeviceHandle(100)))
+                .expect("Failed to send");
             true
         } else {
             false

@@ -7,6 +7,7 @@
 //! - Hot-plug detection
 //! - USB transfer execution (control, bulk, interrupt)
 //! - Device lifecycle management
+//! - Multi-client device sharing and access arbitration
 //!
 //! The USB subsystem runs in a dedicated thread (worker) to avoid blocking
 //! the Tokio async runtime, following the architecture design pattern for
@@ -18,10 +19,12 @@
 
 pub mod device;
 pub mod manager;
+pub mod sharing;
 pub mod transfers;
 pub mod worker;
 
 // Re-export public types
 pub use device::UsbDevice;
 pub use manager::DeviceManager;
+pub use sharing::{DeviceAccessTracker, DeviceSharingState, SharingEvent};
 pub use worker::{UsbWorkerThread, spawn_usb_worker};

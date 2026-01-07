@@ -12,8 +12,8 @@
 //! Run with: `cargo test -p client --test integration_tests`
 
 use common::test_utils::{
-    create_mock_device_descriptor, create_mock_device_info, create_mock_setup_packet,
-    with_timeout, DEFAULT_TEST_TIMEOUT,
+    DEFAULT_TEST_TIMEOUT, create_mock_device_descriptor, create_mock_device_info,
+    create_mock_setup_packet, with_timeout,
 };
 use protocol::{DeviceHandle, DeviceId, DeviceSpeed, RequestId, TransferResult, TransferType};
 use serde::{Deserialize, Serialize};
@@ -812,9 +812,7 @@ fn test_mock_device_info_creation_and_validation() {
 
 #[test]
 fn test_mock_device_list_serialization_roundtrip() {
-    use protocol::{
-        encode_message, decode_message, Message, MessagePayload, CURRENT_VERSION,
-    };
+    use protocol::{CURRENT_VERSION, Message, MessagePayload, decode_message, encode_message};
 
     // Create mock device list
     let devices: Vec<_> = (1..=5)
@@ -834,7 +832,10 @@ fn test_mock_device_list_serialization_roundtrip() {
     let decoded = decode_message(&bytes).expect("Failed to decode");
 
     // Verify
-    if let MessagePayload::ListDevicesResponse { devices: decoded_devices } = decoded.payload {
+    if let MessagePayload::ListDevicesResponse {
+        devices: decoded_devices,
+    } = decoded.payload
+    {
         assert_eq!(decoded_devices.len(), 5);
         for (original, decoded) in devices.iter().zip(decoded_devices.iter()) {
             assert_eq!(original.id, decoded.id);
@@ -850,7 +851,7 @@ fn test_mock_device_list_serialization_roundtrip() {
 
 #[test]
 fn test_mock_device_info_with_empty_optionals() {
-    use protocol::{DeviceInfo, DeviceId, DeviceSpeed};
+    use protocol::{DeviceId, DeviceInfo, DeviceSpeed};
 
     // Create device with no optional fields
     let device = DeviceInfo {
@@ -870,11 +871,13 @@ fn test_mock_device_info_with_empty_optionals() {
     };
 
     // Should serialize/deserialize correctly
-    use protocol::{encode_message, decode_message, Message, MessagePayload, CURRENT_VERSION};
+    use protocol::{CURRENT_VERSION, Message, MessagePayload, decode_message, encode_message};
 
     let msg = Message {
         version: CURRENT_VERSION,
-        payload: MessagePayload::ListDevicesResponse { devices: vec![device] },
+        payload: MessagePayload::ListDevicesResponse {
+            devices: vec![device],
+        },
     };
 
     let bytes = encode_message(&msg).expect("Failed to encode");
@@ -895,9 +898,7 @@ fn test_mock_device_info_with_empty_optionals() {
 
 #[test]
 fn test_simulated_discovery_flow() {
-    use protocol::{
-        encode_framed, decode_framed, Message, MessagePayload, CURRENT_VERSION,
-    };
+    use protocol::{CURRENT_VERSION, Message, MessagePayload, decode_framed, encode_framed};
 
     // Step 1: Client sends ListDevicesRequest
     let request = Message {
@@ -939,8 +940,8 @@ fn test_simulated_discovery_flow() {
 #[test]
 fn test_simulated_attach_detach_flow() {
     use protocol::{
-        encode_framed, decode_framed, Message, MessagePayload, CURRENT_VERSION,
-        DeviceId, DeviceHandle,
+        CURRENT_VERSION, DeviceHandle, DeviceId, Message, MessagePayload, decode_framed,
+        encode_framed,
     };
 
     // Step 1: Client sends AttachDeviceRequest
@@ -996,8 +997,8 @@ fn test_simulated_attach_detach_flow() {
 #[test]
 fn test_simulated_transfer_flow() {
     use protocol::{
-        encode_framed, decode_framed, Message, MessagePayload, CURRENT_VERSION,
-        RequestId, DeviceHandle, TransferType, UsbRequest, UsbResponse, TransferResult,
+        CURRENT_VERSION, DeviceHandle, Message, MessagePayload, RequestId, TransferResult,
+        TransferType, UsbRequest, UsbResponse, decode_framed, encode_framed,
     };
 
     // Step 1: Client submits a control transfer
@@ -1008,9 +1009,9 @@ fn test_simulated_transfer_flow() {
                 id: RequestId(12345),
                 handle: DeviceHandle(100),
                 transfer: TransferType::Control {
-                    request_type: 0x80,      // Device-to-host, Standard, Device
-                    request: 0x06,           // GET_DESCRIPTOR
-                    value: 0x0100,           // Device descriptor
+                    request_type: 0x80, // Device-to-host, Standard, Device
+                    request: 0x06,      // GET_DESCRIPTOR
+                    value: 0x0100,      // Device descriptor
                     index: 0,
                     data: vec![],
                 },
@@ -1048,8 +1049,8 @@ fn test_simulated_transfer_flow() {
         assert_eq!(response.id.0, 12345);
         if let TransferResult::Success { data } = response.result {
             assert_eq!(data.len(), 18); // Device descriptor size
-            assert_eq!(data[0], 0x12);  // bLength
-            assert_eq!(data[1], 0x01);  // bDescriptorType (Device)
+            assert_eq!(data[0], 0x12); // bLength
+            assert_eq!(data[1], 0x01); // bDescriptorType (Device)
         } else {
             panic!("Expected success result");
         }
@@ -1061,9 +1062,8 @@ fn test_simulated_transfer_flow() {
 #[test]
 fn test_simulated_error_responses() {
     use protocol::{
-        encode_framed, decode_framed, Message, MessagePayload, CURRENT_VERSION,
-        AttachError, DetachError,
-        RequestId, UsbResponse, TransferResult, UsbError,
+        AttachError, CURRENT_VERSION, DetachError, Message, MessagePayload, RequestId,
+        TransferResult, UsbError, UsbResponse, decode_framed, encode_framed,
     };
 
     // Test attach errors
@@ -1071,7 +1071,9 @@ fn test_simulated_error_responses() {
         AttachError::DeviceNotFound,
         AttachError::AlreadyAttached,
         AttachError::PermissionDenied,
-        AttachError::Other { message: "Test error".to_string() },
+        AttachError::Other {
+            message: "Test error".to_string(),
+        },
     ];
 
     for error in attach_errors {
@@ -1095,7 +1097,9 @@ fn test_simulated_error_responses() {
     // Test detach errors
     let detach_errors = [
         DetachError::HandleNotFound,
-        DetachError::Other { message: "Detach failed".to_string() },
+        DetachError::Other {
+            message: "Detach failed".to_string(),
+        },
     ];
 
     for error in detach_errors {
@@ -1127,7 +1131,9 @@ fn test_simulated_error_responses() {
         UsbError::Io,
         UsbError::InvalidParam,
         UsbError::Access,
-        UsbError::Other { message: "Unknown error".to_string() },
+        UsbError::Other {
+            message: "Unknown error".to_string(),
+        },
     ];
 
     for error in transfer_errors {
@@ -1136,7 +1142,9 @@ fn test_simulated_error_responses() {
             payload: MessagePayload::TransferComplete {
                 response: UsbResponse {
                     id: RequestId(1),
-                    result: TransferResult::Error { error: error.clone() },
+                    result: TransferResult::Error {
+                        error: error.clone(),
+                    },
                 },
             },
         };
@@ -1144,7 +1152,10 @@ fn test_simulated_error_responses() {
         let decoded = decode_framed(&bytes).expect("Failed to decode");
 
         if let MessagePayload::TransferComplete { response } = decoded.payload {
-            if let TransferResult::Error { error: decoded_error } = response.result {
+            if let TransferResult::Error {
+                error: decoded_error,
+            } = response.result
+            {
                 assert_eq!(decoded_error, error);
             } else {
                 panic!("Expected error result");
@@ -1161,7 +1172,7 @@ fn test_simulated_error_responses() {
 
 #[test]
 fn test_protocol_version_compatibility() {
-    use protocol::{validate_version, CURRENT_VERSION, ProtocolVersion};
+    use protocol::{CURRENT_VERSION, ProtocolVersion, validate_version};
 
     // Current version should always be compatible
     assert!(validate_version(&CURRENT_VERSION).is_ok());
@@ -1185,9 +1196,7 @@ fn test_protocol_version_compatibility() {
 
 #[test]
 fn test_message_with_different_versions() {
-    use protocol::{
-        encode_message, decode_message, Message, MessagePayload, ProtocolVersion,
-    };
+    use protocol::{Message, MessagePayload, ProtocolVersion, decode_message, encode_message};
 
     // Create message with custom version
     let custom_version = ProtocolVersion {
@@ -1216,9 +1225,7 @@ fn test_message_with_different_versions() {
 
 #[test]
 fn test_empty_device_list() {
-    use protocol::{
-        encode_framed, decode_framed, Message, MessagePayload, CURRENT_VERSION,
-    };
+    use protocol::{CURRENT_VERSION, Message, MessagePayload, decode_framed, encode_framed};
 
     let msg = Message {
         version: CURRENT_VERSION,
@@ -1238,8 +1245,8 @@ fn test_empty_device_list() {
 #[test]
 fn test_large_bulk_transfer() {
     use protocol::{
-        encode_framed, decode_framed, Message, MessagePayload, CURRENT_VERSION,
-        RequestId, DeviceHandle, TransferType, UsbRequest,
+        CURRENT_VERSION, DeviceHandle, Message, MessagePayload, RequestId, TransferType,
+        UsbRequest, decode_framed, encode_framed,
     };
 
     // Test with 64KB bulk transfer (common USB buffer size)
@@ -1277,9 +1284,7 @@ fn test_large_bulk_transfer() {
 
 #[test]
 fn test_ping_pong_roundtrip() {
-    use protocol::{
-        encode_framed, decode_framed, Message, MessagePayload, CURRENT_VERSION,
-    };
+    use protocol::{CURRENT_VERSION, Message, MessagePayload, decode_framed, encode_framed};
 
     // Test Ping
     let ping = Message {
@@ -1302,22 +1307,22 @@ fn test_ping_pong_roundtrip() {
 
 #[test]
 fn test_error_message_roundtrip() {
-    use protocol::{
-        encode_framed, decode_framed, Message, MessagePayload, CURRENT_VERSION,
-    };
+    use protocol::{CURRENT_VERSION, Message, MessagePayload, decode_framed, encode_framed};
 
     let error_messages = [
         "Simple error",
         "Error with unicode: test",
         "Error with newlines:\nLine 2\nLine 3",
-        &"A".repeat(1000),  // Long error
-        "",                  // Empty error
+        &"A".repeat(1000), // Long error
+        "",                // Empty error
     ];
 
     for error_msg in error_messages {
         let msg = Message {
             version: CURRENT_VERSION,
-            payload: MessagePayload::Error { message: error_msg.to_string() },
+            payload: MessagePayload::Error {
+                message: error_msg.to_string(),
+            },
         };
 
         let bytes = encode_framed(&msg).expect("Failed to encode");

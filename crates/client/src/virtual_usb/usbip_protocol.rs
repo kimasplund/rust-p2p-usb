@@ -10,15 +10,43 @@
 //! - Each message has a 48-byte header followed by optional payload
 //! - Requests from vhci_hcd to userspace: CMD_SUBMIT, CMD_UNLINK
 //! - Responses from userspace to vhci_hcd: RET_SUBMIT, RET_UNLINK
+//!
+//! # USB 3.0 SuperSpeed Support
+//!
+//! This module supports USB 3.0 SuperSpeed devices with:
+//! - Larger URB buffer sizes (up to 1MB for bulk transfers)
+//! - SuperSpeed port assignment (ports 8-15 for SS devices)
+//! - Speed-aware buffer allocation
 
 use anyhow::Result;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use protocol::{RequestId, TransferType, UsbRequest, UsbResponse};
+use protocol::{
+    DeviceSpeed, IsoPacketDescriptor, RequestId, TransferType, UsbRequest, UsbResponse,
+};
 use std::io::{Read, Write};
 
 /// USB/IP protocol version
 #[allow(dead_code)]
 pub const USBIP_VERSION: u16 = 0x0111; // Version 1.1.1
+
+/// Default URB buffer size for USB 2.0 devices (64KB)
+pub const URB_BUFFER_SIZE_HIGH_SPEED: usize = 64 * 1024;
+
+/// URB buffer size for USB 3.0 SuperSpeed devices (256KB)
+pub const URB_BUFFER_SIZE_SUPERSPEED: usize = 256 * 1024;
+
+/// Maximum URB buffer size for USB 3.0 SuperSpeed+ devices (1MB)
+pub const URB_BUFFER_SIZE_SUPERSPEED_PLUS: usize = 1024 * 1024;
+
+/// Get optimal URB buffer size based on device speed
+pub fn optimal_urb_buffer_size(speed: DeviceSpeed) -> usize {
+    match speed {
+        DeviceSpeed::Low | DeviceSpeed::Full => URB_BUFFER_SIZE_HIGH_SPEED,
+        DeviceSpeed::High => URB_BUFFER_SIZE_HIGH_SPEED,
+        DeviceSpeed::Super => URB_BUFFER_SIZE_SUPERSPEED,
+        DeviceSpeed::SuperPlus => URB_BUFFER_SIZE_SUPERSPEED_PLUS,
+    }
+}
 
 /// USB/IP import/export commands
 #[allow(dead_code)]
@@ -430,21 +458,32 @@ pub async fn usbip_to_usb_request(
             data
         };
 
-        // USB/IP interval field is unreliable for determining transfer type.
-        // The Linux kernel sets interval=1 for bulk endpoints too.
-        // Typical interrupt polling intervals are >= 8ms, so use that as threshold.
-        // For interval <= 1, default to Bulk which is more common and works for printers.
-    /*
-    if cmd.number_of_packets > 0 {
-        // Isochronous transfer
-        let packet_lengths = cmd.iso_packets.iter().map(|p| p.length).collect();
-        TransferType::Isochronous {
-            endpoint,
-            data: transfer_data,
-            packet_lengths,
-            timeout_ms,
-        }
-    } else */ if cmd.interval > 1 {
+        // Determine transfer type based on number_of_packets and interval
+        // number_of_packets > 0 indicates isochronous transfer
+        // interval > 1 indicates interrupt transfer (interval=0 or 1 is commonly bulk)
+        if cmd.number_of_packets > 0 {
+            // Isochronous transfer
+            // Convert USB/IP ISO descriptors to protocol IsoPacketDescriptor
+            let iso_packet_descriptors: Vec<IsoPacketDescriptor> = cmd
+                .iso_packets
+                .iter()
+                .map(|p| IsoPacketDescriptor {
+                    offset: p.offset,
+                    length: p.length,
+                    actual_length: p.actual_length,
+                    status: p.status as i32,
+                })
+                .collect();
+
+            TransferType::Isochronous {
+                endpoint,
+                data: transfer_data,
+                iso_packet_descriptors,
+                start_frame: cmd.start_frame,
+                interval: cmd.interval,
+                timeout_ms,
+            }
+        } else if cmd.interval > 1 {
             // Interrupt transfer (has meaningful polling interval)
             TransferType::Interrupt {
                 endpoint,
@@ -468,12 +507,57 @@ pub async fn usbip_to_usb_request(
     })
 }
 
+/// Result from converting UsbResponse to USB/IP format
+pub struct UsbIpConvertedResponse {
+    pub ret: UsbIpRetSubmit,
+    pub data: Vec<u8>,
+    pub iso_packets: Vec<UsbIpIsoPacketDescriptor>,
+}
+
 /// Convert our protocol UsbResponse to USB/IP RET_SUBMIT
 pub fn usb_response_to_usbip(response: &UsbResponse) -> (UsbIpRetSubmit, Vec<u8>) {
+    let converted = usb_response_to_usbip_full(response);
+    (converted.ret, converted.data)
+}
+
+/// Convert our protocol UsbResponse to USB/IP RET_SUBMIT with full ISO support
+pub fn usb_response_to_usbip_full(response: &UsbResponse) -> UsbIpConvertedResponse {
     match &response.result {
         protocol::TransferResult::Success { data } => {
             let ret = UsbIpRetSubmit::success(data.len() as u32);
-            (ret, data.clone())
+            UsbIpConvertedResponse {
+                ret,
+                data: data.clone(),
+                iso_packets: Vec::new(),
+            }
+        }
+        protocol::TransferResult::IsochronousSuccess {
+            data,
+            iso_packet_descriptors,
+            start_frame,
+            error_count,
+        } => {
+            let ret = UsbIpRetSubmit {
+                status: 0,
+                actual_length: data.len() as u32,
+                start_frame: *start_frame,
+                number_of_packets: iso_packet_descriptors.len() as u32,
+                error_count: *error_count,
+            };
+            let iso_packets: Vec<UsbIpIsoPacketDescriptor> = iso_packet_descriptors
+                .iter()
+                .map(|p| UsbIpIsoPacketDescriptor {
+                    offset: p.offset,
+                    length: p.length,
+                    actual_length: p.actual_length,
+                    status: p.status as u32,
+                })
+                .collect();
+            UsbIpConvertedResponse {
+                ret,
+                data: data.clone(),
+                iso_packets,
+            }
         }
         protocol::TransferResult::Error { error } => {
             // Map protocol errors to Linux errno values
@@ -490,7 +574,11 @@ pub fn usb_response_to_usbip(response: &UsbResponse) -> (UsbIpRetSubmit, Vec<u8>
                 protocol::UsbError::Other { .. } => -5,  // EIO
             };
             let ret = UsbIpRetSubmit::error(errno);
-            (ret, Vec::new())
+            UsbIpConvertedResponse {
+                ret,
+                data: Vec::new(),
+                iso_packets: Vec::new(),
+            }
         }
     }
 }
@@ -671,6 +759,74 @@ mod tests {
         // Verify CMD_UNLINK message sizes
         // CMD_UNLINK: header (20) + payload (4) = 24 bytes
         assert_eq!(UsbIpHeader::SIZE + UsbIpCmdUnlink::SIZE, 24);
+    }
+
+    #[test]
+    fn test_urb_buffer_size_constants() {
+        assert_eq!(URB_BUFFER_SIZE_HIGH_SPEED, 64 * 1024);
+        assert_eq!(URB_BUFFER_SIZE_SUPERSPEED, 256 * 1024);
+        assert_eq!(URB_BUFFER_SIZE_SUPERSPEED_PLUS, 1024 * 1024);
+    }
+
+    #[test]
+    fn test_optimal_urb_buffer_size() {
+        assert_eq!(
+            optimal_urb_buffer_size(DeviceSpeed::Low),
+            URB_BUFFER_SIZE_HIGH_SPEED
+        );
+        assert_eq!(
+            optimal_urb_buffer_size(DeviceSpeed::Full),
+            URB_BUFFER_SIZE_HIGH_SPEED
+        );
+        assert_eq!(
+            optimal_urb_buffer_size(DeviceSpeed::High),
+            URB_BUFFER_SIZE_HIGH_SPEED
+        );
+        assert_eq!(
+            optimal_urb_buffer_size(DeviceSpeed::Super),
+            URB_BUFFER_SIZE_SUPERSPEED
+        );
+        assert_eq!(
+            optimal_urb_buffer_size(DeviceSpeed::SuperPlus),
+            URB_BUFFER_SIZE_SUPERSPEED_PLUS
+        );
+    }
+
+    #[test]
+    fn test_map_device_speed_to_u32() {
+        assert_eq!(map_device_speed_to_u32(DeviceSpeed::Low), 1);
+        assert_eq!(map_device_speed_to_u32(DeviceSpeed::Full), 2);
+        assert_eq!(map_device_speed_to_u32(DeviceSpeed::High), 3);
+        assert_eq!(map_device_speed_to_u32(DeviceSpeed::Super), 5);
+        assert_eq!(map_device_speed_to_u32(DeviceSpeed::SuperPlus), 6);
+    }
+
+    #[test]
+    fn test_ret_submit_serialization_superspeed() {
+        // Test with SuperSpeed transfer size (256KB)
+        let ret = UsbIpRetSubmit::success(URB_BUFFER_SIZE_SUPERSPEED as u32);
+
+        let mut buf = Vec::new();
+        ret.write_to(&mut buf).unwrap();
+
+        assert_eq!(buf.len(), UsbIpRetSubmit::SIZE);
+
+        // actual_length = 262144 (0x00040000)
+        assert_eq!(&buf[4..8], &[0x00, 0x04, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_ret_submit_serialization_superspeed_plus() {
+        // Test with SuperSpeed+ transfer size (1MB)
+        let ret = UsbIpRetSubmit::success(URB_BUFFER_SIZE_SUPERSPEED_PLUS as u32);
+
+        let mut buf = Vec::new();
+        ret.write_to(&mut buf).unwrap();
+
+        assert_eq!(buf.len(), UsbIpRetSubmit::SIZE);
+
+        // actual_length = 1048576 (0x00100000)
+        assert_eq!(&buf[4..8], &[0x00, 0x10, 0x00, 0x00]);
     }
 }
 

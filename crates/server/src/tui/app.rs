@@ -4,7 +4,7 @@
 //! the UI rendering and the USB/network subsystems.
 
 use anyhow::{Context, Result};
-use common::{UsbBridge, UsbCommand, UsbEvent};
+use common::{MetricsSnapshot, TransferMetrics, UsbBridge, UsbCommand, UsbEvent};
 use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -14,6 +14,7 @@ use protocol::DeviceInfo;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Stdout};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -45,6 +46,8 @@ pub enum Dialog {
     Clients,
     /// Confirm device reset
     ConfirmReset,
+    /// QR code dialog showing server EndpointId
+    QrCode,
 }
 
 /// Application state
@@ -73,6 +76,12 @@ pub struct App {
     auto_share: bool,
     /// Pending reset action confirmed by user
     pub pending_reset: bool,
+    /// Per-client transfer metrics
+    client_metrics: HashMap<String, Arc<TransferMetrics>>,
+    /// Per-device transfer metrics
+    device_metrics: HashMap<u32, Arc<TransferMetrics>>,
+    /// Total server-wide metrics
+    total_metrics: Arc<TransferMetrics>,
 }
 
 /// Network events for updating the TUI
@@ -97,6 +106,9 @@ impl App {
         network_rx: mpsc::UnboundedReceiver<NetworkEvent>,
         auto_share: bool,
     ) -> Self {
+        let total_metrics = Arc::new(TransferMetrics::new());
+        total_metrics.mark_connected();
+
         Self {
             endpoint_id,
             devices: HashMap::new(),
@@ -110,7 +122,59 @@ impl App {
             network_rx,
             auto_share,
             pending_reset: false,
+            client_metrics: HashMap::new(),
+            device_metrics: HashMap::new(),
+            total_metrics,
         }
+    }
+
+    /// Get total server metrics snapshot
+    pub fn total_metrics(&self) -> MetricsSnapshot {
+        MetricsSnapshot::from_metrics(&self.total_metrics)
+    }
+
+    /// Get metrics for a specific client
+    pub fn client_metrics(&self, client_id: &str) -> Option<MetricsSnapshot> {
+        self.client_metrics
+            .get(client_id)
+            .map(|m| MetricsSnapshot::from_metrics(m))
+    }
+
+    /// Get metrics for a specific device
+    pub fn device_metrics(&self, device_id: u32) -> Option<MetricsSnapshot> {
+        self.device_metrics
+            .get(&device_id)
+            .map(|m| MetricsSnapshot::from_metrics(m))
+    }
+
+    /// Get or create metrics for a client
+    pub fn get_or_create_client_metrics(&mut self, client_id: &str) -> Arc<TransferMetrics> {
+        self.client_metrics
+            .entry(client_id.to_string())
+            .or_insert_with(|| {
+                let metrics = Arc::new(TransferMetrics::new());
+                metrics.mark_connected();
+                metrics
+            })
+            .clone()
+    }
+
+    /// Get or create metrics for a device
+    pub fn get_or_create_device_metrics(&mut self, device_id: u32) -> Arc<TransferMetrics> {
+        self.device_metrics
+            .entry(device_id)
+            .or_insert_with(|| Arc::new(TransferMetrics::new()))
+            .clone()
+    }
+
+    /// Get the underlying total metrics tracker (for recording transfers)
+    pub fn total_metrics_tracker(&self) -> Arc<TransferMetrics> {
+        self.total_metrics.clone()
+    }
+
+    /// Get all client IDs with metrics
+    pub fn client_ids_with_metrics(&self) -> Vec<&str> {
+        self.client_metrics.keys().map(|s| s.as_str()).collect()
     }
 
     /// Get the server's EndpointId
@@ -222,6 +286,11 @@ impl App {
             Action::ShowHelp => {
                 self.dialog = Dialog::Help;
             }
+            Action::ShowQrCode => {
+                if self.dialog == Dialog::None {
+                    self.dialog = Dialog::QrCode;
+                }
+            }
             Action::Refresh => {
                 // Refresh will be handled in the main loop by re-fetching devices
                 debug!("Refresh requested");
@@ -245,27 +314,30 @@ impl App {
     /// Reset the currently selected device
     pub async fn reset_selected_device(&self) -> Result<()> {
         if let Some(&device_id) = self.device_order.get(self.selected_index) {
-             let (tx, rx) = tokio::sync::oneshot::channel();
-             // We need to look up the handle from device_id, but the current state structure
-             // assumes DeviceId == DeviceHandle value (which is true in current implementation).
-             // Let's use the device_id as the handle value.
-             let handle = protocol::DeviceHandle(device_id);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            // We need to look up the handle from device_id, but the current state structure
+            // assumes DeviceId == DeviceHandle value (which is true in current implementation).
+            // Let's use the device_id as the handle value.
+            let handle = protocol::DeviceHandle(device_id);
 
-             info!("Sending reset command for device {}", device_id);
-             self.usb_bridge
-                .send_command(UsbCommand::ResetDevice { handle, response: tx })
+            info!("Sending reset command for device {}", device_id);
+            self.usb_bridge
+                .send_command(UsbCommand::ResetDevice {
+                    handle,
+                    response: tx,
+                })
                 .await
                 .context("Failed to send ResetDevice command")?;
 
-             match rx.await.context("Failed to receive reset response")? {
-                 Ok(_) => {
-                     info!("Device {} reset successfully", device_id);
-                 }
-                 Err(e) => {
-                     warn!("Failed to reset device {}: {:?}", device_id, e);
-                     return Err(anyhow::anyhow!("Reset failed: {:?}", e));
-                 }
-             }
+            match rx.await.context("Failed to receive reset response")? {
+                Ok(_) => {
+                    info!("Device {} reset successfully", device_id);
+                }
+                Err(e) => {
+                    warn!("Failed to reset device {}: {:?}", device_id, e);
+                    return Err(anyhow::anyhow!("Reset failed: {:?}", e));
+                }
+            }
         }
         Ok(())
     }
@@ -347,6 +419,12 @@ impl App {
                 if !self.device_order.is_empty() && self.selected_index >= self.device_order.len() {
                     self.selected_index = self.device_order.len() - 1;
                 }
+            }
+            // Sharing-related events are handled by the network layer
+            UsbEvent::DeviceAvailable { .. }
+            | UsbEvent::QueuePositionChanged { .. }
+            | UsbEvent::LockExpired { .. } => {
+                // These events are for client notification, handled elsewhere
             }
         }
     }

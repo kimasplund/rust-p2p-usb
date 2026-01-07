@@ -42,9 +42,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+use super::GlobalDeviceId;
 use super::device::VirtualDevice;
 use super::socket_bridge::SocketBridge;
-use super::GlobalDeviceId;
 use crate::network::device_proxy::DeviceProxy;
 
 /// Linux-specific virtual USB manager using USB/IP
@@ -103,8 +103,8 @@ impl LinuxVirtualUsbManager {
     /// Returns (hs_bitmap, ss_bitmap) where 1 = in use, 0 = free
     fn read_kernel_port_status(vhci_path: &Path) -> Result<(u8, u8)> {
         let status_path = vhci_path.join("status");
-        let content = std::fs::read_to_string(&status_path)
-            .context("Failed to read VHCI status file")?;
+        let content =
+            std::fs::read_to_string(&status_path).context("Failed to read VHCI status file")?;
 
         let mut hs_bitmap: u8 = 0;
         let mut ss_bitmap: u8 = 0;
@@ -267,10 +267,7 @@ impl LinuxVirtualUsbManager {
         let port = device.vhci_port();
         let device_proxy = device.device_proxy().clone();
 
-        debug!(
-            "Detaching virtual device: {}, port={}",
-            global_id, port
-        );
+        debug!("Detaching virtual device: {}, port={}", global_id, port);
 
         // Stop the socket bridge first
         let mut bridges = self.socket_bridges.write().await;
@@ -313,7 +310,10 @@ impl LinuxVirtualUsbManager {
     ///
     /// Returns a set of DeviceIds for devices currently attached via USB/IP from the given server.
     /// Used for reconciliation after reconnection to compare with server state.
-    pub async fn get_attached_device_ids(&self, server_id: EndpointId) -> HashSet<protocol::DeviceId> {
+    pub async fn get_attached_device_ids(
+        &self,
+        server_id: EndpointId,
+    ) -> HashSet<protocol::DeviceId> {
         let devices = self.attached_devices.read().await;
         devices
             .iter()
@@ -326,7 +326,10 @@ impl LinuxVirtualUsbManager {
     ///
     /// Returns a vector of (GlobalDeviceId, DeviceId) pairs for all attached devices from the server.
     /// Used for reconciliation to identify which devices to detach.
-    pub async fn get_attached_device_info(&self, server_id: EndpointId) -> Vec<(GlobalDeviceId, protocol::DeviceId)> {
+    pub async fn get_attached_device_info(
+        &self,
+        server_id: EndpointId,
+    ) -> Vec<(GlobalDeviceId, protocol::DeviceId)> {
         let devices = self.attached_devices.read().await;
         devices
             .iter()
@@ -339,7 +342,10 @@ impl LinuxVirtualUsbManager {
     ///
     /// Used when a server connection is lost or intentionally closed.
     /// Returns the list of GlobalDeviceIds that were successfully detached.
-    pub async fn detach_all_from_server(&self, server_id: EndpointId) -> Result<Vec<GlobalDeviceId>> {
+    pub async fn detach_all_from_server(
+        &self,
+        server_id: EndpointId,
+    ) -> Result<Vec<GlobalDeviceId>> {
         // Get all devices from this server
         let devices_to_detach: Vec<GlobalDeviceId> = {
             let devices = self.attached_devices.read().await;
@@ -385,8 +391,8 @@ impl LinuxVirtualUsbManager {
         // This handles multiple client processes sharing the VHCI
         // If reading fails (e.g., in tests or if VHCI isn't accessible),
         // fall back to using local bitmap only
-        let (kernel_hs, kernel_ss) = Self::read_kernel_port_status(&self.vhci_path)
-            .unwrap_or((0, 0));
+        let (kernel_hs, kernel_ss) =
+            Self::read_kernel_port_status(&self.vhci_path).unwrap_or((0, 0));
 
         match speed {
             // USB 2.0 and below: use high-speed ports (0-7)
@@ -629,6 +635,26 @@ fn map_device_speed(speed: DeviceSpeed) -> u8 {
         DeviceSpeed::High => 3,      // USB_SPEED_HIGH - 480 Mbps
         DeviceSpeed::Super => 5,     // USB_SPEED_SUPER - 5 Gbps (NOT 4 - that's WIRELESS)
         DeviceSpeed::SuperPlus => 6, // USB_SPEED_SUPER_PLUS - 10+ Gbps
+    }
+}
+
+/// Check if a port number is a SuperSpeed port (8-15)
+pub fn is_superspeed_port(port: u8) -> bool {
+    port >= 8 && port < 16
+}
+
+/// Check if a port number is a High-Speed port (0-7)
+pub fn is_high_speed_port(port: u8) -> bool {
+    port < 8
+}
+
+/// Get the port range for a device speed
+///
+/// Returns (start, end) inclusive range of valid ports for the speed class.
+pub fn port_range_for_speed(speed: DeviceSpeed) -> (u8, u8) {
+    match speed {
+        DeviceSpeed::Low | DeviceSpeed::Full | DeviceSpeed::High => (0, 7),
+        DeviceSpeed::Super | DeviceSpeed::SuperPlus => (8, 15),
     }
 }
 
@@ -915,5 +941,84 @@ mod tests {
             super_plus >= 8 && super_plus < 16,
             "SuperPlus speed should use SS port"
         );
+    }
+
+    #[test]
+    fn test_is_superspeed_port() {
+        for port in 0..8 {
+            assert!(
+                !is_superspeed_port(port),
+                "Port {} should NOT be SuperSpeed",
+                port
+            );
+        }
+        for port in 8..16 {
+            assert!(
+                is_superspeed_port(port),
+                "Port {} should be SuperSpeed",
+                port
+            );
+        }
+        assert!(!is_superspeed_port(16), "Port 16 should NOT be SuperSpeed");
+        assert!(
+            !is_superspeed_port(255),
+            "Port 255 should NOT be SuperSpeed"
+        );
+    }
+
+    #[test]
+    fn test_is_high_speed_port() {
+        for port in 0..8 {
+            assert!(
+                is_high_speed_port(port),
+                "Port {} should be HighSpeed",
+                port
+            );
+        }
+        for port in 8..16 {
+            assert!(
+                !is_high_speed_port(port),
+                "Port {} should NOT be HighSpeed",
+                port
+            );
+        }
+    }
+
+    #[test]
+    fn test_port_range_for_speed() {
+        assert_eq!(port_range_for_speed(DeviceSpeed::Low), (0, 7));
+        assert_eq!(port_range_for_speed(DeviceSpeed::Full), (0, 7));
+        assert_eq!(port_range_for_speed(DeviceSpeed::High), (0, 7));
+        assert_eq!(port_range_for_speed(DeviceSpeed::Super), (8, 15));
+        assert_eq!(port_range_for_speed(DeviceSpeed::SuperPlus), (8, 15));
+    }
+
+    #[test]
+    fn test_device_speed_helper_methods() {
+        assert!(!DeviceSpeed::Low.is_superspeed());
+        assert!(!DeviceSpeed::Full.is_superspeed());
+        assert!(!DeviceSpeed::High.is_superspeed());
+        assert!(DeviceSpeed::Super.is_superspeed());
+        assert!(DeviceSpeed::SuperPlus.is_superspeed());
+    }
+
+    #[test]
+    fn test_superspeed_max_bulk_transfer_size() {
+        // These values match the SuperSpeedConfig::for_speed() settings
+        // and represent recommended max buffer sizes per USB speed class
+        assert_eq!(DeviceSpeed::Low.max_bulk_transfer_size(), 4 * 1024);  // USB 1.0
+        assert_eq!(DeviceSpeed::Full.max_bulk_transfer_size(), 4 * 1024); // USB 1.1
+        assert_eq!(DeviceSpeed::High.max_bulk_transfer_size(), 64 * 1024); // USB 2.0
+        assert_eq!(DeviceSpeed::Super.max_bulk_transfer_size(), 1024 * 1024); // USB 3.0
+        assert_eq!(DeviceSpeed::SuperPlus.max_bulk_transfer_size(), 1024 * 1024); // USB 3.1
+    }
+
+    #[test]
+    fn test_superspeed_optimal_chunk_size() {
+        assert_eq!(DeviceSpeed::Low.optimal_chunk_size(), 8);
+        assert_eq!(DeviceSpeed::Full.optimal_chunk_size(), 64);
+        assert_eq!(DeviceSpeed::High.optimal_chunk_size(), 512);
+        assert_eq!(DeviceSpeed::Super.optimal_chunk_size(), 1024);
+        assert_eq!(DeviceSpeed::SuperPlus.optimal_chunk_size(), 1024);
     }
 }

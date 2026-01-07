@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 use super::connection::ClientConnection;
+use crate::audit::SharedAuditLogger;
 use crate::config::ServerConfig;
 
 /// Iroh P2P server for USB device sharing
@@ -27,6 +28,8 @@ pub struct IrohServer {
     allowed_clients: Arc<RwLock<HashSet<EndpointId>>>,
     /// Server configuration
     config: ServerConfig,
+    /// Audit logger
+    audit_logger: SharedAuditLogger,
 }
 
 impl IrohServer {
@@ -35,10 +38,15 @@ impl IrohServer {
     /// # Arguments
     /// * `config` - Server configuration including allowlist
     /// * `usb_bridge` - Communication bridge to USB subsystem
+    /// * `audit_logger` - Optional audit logger for compliance logging
     ///
     /// # Returns
     /// Configured server ready to start accepting connections
-    pub async fn new(config: ServerConfig, usb_bridge: UsbBridge) -> Result<Self> {
+    pub async fn new(
+        config: ServerConfig,
+        usb_bridge: UsbBridge,
+        audit_logger: SharedAuditLogger,
+    ) -> Result<Self> {
         info!("Initializing Iroh P2P server...");
 
         // Load or generate persistent secret key for stable EndpointId
@@ -77,6 +85,7 @@ impl IrohServer {
             usb_bridge,
             allowed_clients: Arc::new(RwLock::new(allowed_clients)),
             config,
+            audit_logger,
         })
     }
 
@@ -113,11 +122,17 @@ impl IrohServer {
             let usb_bridge = self.usb_bridge.clone();
             let allowed_clients = self.allowed_clients.clone();
             let require_approval = self.config.security.require_approval;
+            let audit_logger = self.audit_logger.clone();
 
             tokio::spawn(async move {
-                if let Err(e) =
-                    Self::handle_connection(incoming, usb_bridge, allowed_clients, require_approval)
-                        .await
+                if let Err(e) = Self::handle_connection(
+                    incoming,
+                    usb_bridge,
+                    allowed_clients,
+                    require_approval,
+                    audit_logger,
+                )
+                .await
                 {
                     error!("Connection error: {:#}", e);
                 }
@@ -135,12 +150,14 @@ impl IrohServer {
         usb_bridge: UsbBridge,
         allowed_clients: Arc<RwLock<HashSet<EndpointId>>>,
         require_approval: bool,
+        audit_logger: SharedAuditLogger,
     ) -> Result<()> {
         // Wait for connection to establish
         let connection = incoming.await.context("Failed to establish connection")?;
 
         // Get remote EndpointId
         let remote_endpoint_id = connection.remote_id();
+        let endpoint_id_str = remote_endpoint_id.to_string();
 
         debug!("Connection attempt from: {}", remote_endpoint_id);
 
@@ -152,16 +169,37 @@ impl IrohServer {
                     "Rejected connection from unauthorized EndpointId: {}",
                     remote_endpoint_id
                 );
+
+                // Audit log: authentication failure
+                if let Some(ref logger) = *audit_logger {
+                    logger.log_auth_failure(&endpoint_id_str, "EndpointId not in allowlist");
+                }
+
                 return Ok(()); // Silent rejection
             }
         }
 
         info!("Accepted connection from: {}", remote_endpoint_id);
 
+        // Audit log: client connected
+        if let Some(ref logger) = *audit_logger {
+            logger.log_client_connected(&endpoint_id_str, None);
+        }
+
         // Create and run client connection handler
-        let mut client_conn = ClientConnection::new(remote_endpoint_id, connection, usb_bridge);
+        let mut client_conn = ClientConnection::new(
+            remote_endpoint_id,
+            connection,
+            usb_bridge,
+            audit_logger.clone(),
+        );
 
         client_conn.run().await?;
+
+        // Audit log: client disconnected
+        if let Some(ref logger) = *audit_logger {
+            logger.log_client_disconnected(&endpoint_id_str, None);
+        }
 
         info!("Connection closed: {}", remote_endpoint_id);
         Ok(())
@@ -229,14 +267,17 @@ impl IrohServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::create_audit_logger;
+    use crate::config::AuditConfig;
     use common::create_usb_bridge;
 
     #[tokio::test]
     async fn test_server_creation() {
         let config = ServerConfig::default();
         let (usb_bridge, _worker) = create_usb_bridge();
+        let audit_logger = create_audit_logger(AuditConfig::default());
 
-        let server = IrohServer::new(config, usb_bridge).await;
+        let server = IrohServer::new(config, usb_bridge, audit_logger).await;
         assert!(server.is_ok());
 
         let server = server.unwrap();
@@ -255,7 +296,10 @@ mod tests {
     async fn test_add_remove_client() {
         let config = ServerConfig::default();
         let (usb_bridge, _worker) = create_usb_bridge();
-        let server = IrohServer::new(config, usb_bridge).await.unwrap();
+        let audit_logger = create_audit_logger(AuditConfig::default());
+        let server = IrohServer::new(config, usb_bridge, audit_logger)
+            .await
+            .unwrap();
 
         // Generate a test EndpointId (in real usage, get from client)
         let test_endpoint_id = server.endpoint_id(); // Use server's own EndpointId for testing

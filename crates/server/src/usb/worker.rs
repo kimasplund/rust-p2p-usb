@@ -195,6 +195,57 @@ impl UsbWorkerThread {
                 // Already handled in main loop
                 unreachable!()
             }
+
+            UsbCommand::GetSharingStatus {
+                device_id,
+                handle,
+                response,
+            } => {
+                debug!(
+                    "Getting sharing status for device {:?}, handle {:?}",
+                    device_id, handle
+                );
+                // For now, return a default exclusive status since sharing is not yet
+                // fully integrated with DeviceManager
+                let status = protocol::DeviceSharingStatus {
+                    device_id,
+                    sharing_mode: protocol::SharingMode::Exclusive,
+                    attached_clients: if self.manager.get_device_by_handle(handle.unwrap_or(protocol::DeviceHandle(0))).is_some() { 1 } else { 0 },
+                    has_write_lock: true,
+                    queue_position: 0,
+                    queue_length: 0,
+                };
+                let _ = response.send(Ok(status));
+            }
+
+            UsbCommand::LockDevice {
+                handle,
+                write_access,
+                response,
+            } => {
+                debug!(
+                    "Lock device request: handle {:?}, write_access {}",
+                    handle, write_access
+                );
+                // For now, always grant the lock since we only support exclusive mode
+                if self.manager.get_device_by_handle(handle).is_some() {
+                    let _ = response.send(protocol::LockResult::Acquired);
+                } else {
+                    let _ = response.send(protocol::LockResult::NotAvailable {
+                        reason: "Device not attached".to_string(),
+                    });
+                }
+            }
+
+            UsbCommand::UnlockDevice { handle, response } => {
+                debug!("Unlock device request: handle {:?}", handle);
+                // For now, always succeed since we don't track locks yet
+                if self.manager.get_device_by_handle(handle).is_some() {
+                    let _ = response.send(protocol::UnlockResult::Released);
+                } else {
+                    let _ = response.send(protocol::UnlockResult::NotHeld);
+                }
+            }
         }
     }
 }

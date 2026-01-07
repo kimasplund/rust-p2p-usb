@@ -48,6 +48,36 @@ pub enum UsbCommand {
         response: tokio::sync::oneshot::Sender<Result<(), protocol::UsbError>>,
     },
 
+    /// Get sharing status for a device
+    GetSharingStatus {
+        /// Device ID to query
+        device_id: protocol::DeviceId,
+        /// Optional handle for client-specific status
+        handle: Option<protocol::DeviceHandle>,
+        /// Channel to send response back
+        response: tokio::sync::oneshot::Sender<
+            Result<protocol::DeviceSharingStatus, protocol::AttachError>,
+        >,
+    },
+
+    /// Acquire a lock on a device
+    LockDevice {
+        /// Device handle
+        handle: protocol::DeviceHandle,
+        /// Whether to request write access (for read-only mode)
+        write_access: bool,
+        /// Channel to send response back
+        response: tokio::sync::oneshot::Sender<protocol::LockResult>,
+    },
+
+    /// Release a lock on a device
+    UnlockDevice {
+        /// Device handle
+        handle: protocol::DeviceHandle,
+        /// Channel to send response back
+        response: tokio::sync::oneshot::Sender<protocol::UnlockResult>,
+    },
+
     /// Shutdown the USB thread gracefully
     Shutdown,
 }
@@ -69,6 +99,40 @@ pub enum UsbEvent {
         invalidated_handles: Vec<protocol::DeviceHandle>,
         /// Client IDs that need to be notified
         affected_clients: Vec<String>,
+    },
+
+    /// Device became available for a queued client
+    DeviceAvailable {
+        /// Device ID
+        device_id: protocol::DeviceId,
+        /// Handle that now has access
+        handle: protocol::DeviceHandle,
+        /// Client ID to notify
+        client_id: String,
+        /// Current sharing mode
+        sharing_mode: protocol::SharingMode,
+    },
+
+    /// Queue position changed for a client
+    QueuePositionChanged {
+        /// Device ID
+        device_id: protocol::DeviceId,
+        /// Handle affected
+        handle: protocol::DeviceHandle,
+        /// Client ID to notify
+        client_id: String,
+        /// New queue position (0 = has access)
+        new_position: u32,
+    },
+
+    /// Lock expired for a client
+    LockExpired {
+        /// Device ID
+        device_id: protocol::DeviceId,
+        /// Handle that lost the lock
+        handle: protocol::DeviceHandle,
+        /// Client ID to notify
+        client_id: String,
     },
 }
 

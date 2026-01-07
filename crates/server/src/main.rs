@@ -3,13 +3,17 @@
 //! USB device sharing server that runs on a Raspberry Pi or other Linux host.
 //! Provides USB devices over the network to authorized clients using Iroh P2P networking.
 
+mod audit;
 mod config;
 mod network;
+pub mod policy;
+pub mod qos;
 mod service;
 mod tui;
 mod usb;
 
 use anyhow::{Context, Result};
+use audit::create_audit_logger;
 use clap::Parser;
 use common::{UsbBridge, UsbCommand, create_usb_bridge, setup_logging};
 use network::IrohServer;
@@ -202,8 +206,18 @@ async fn run_service(config: config::ServerConfig, usb_bridge: UsbBridge) -> Res
         info!("Running under systemd");
     }
 
-    // Initialize Iroh server
-    let server = IrohServer::new(config.clone(), usb_bridge.clone())
+    // Initialize audit logger
+    let audit_logger = create_audit_logger(config.audit.clone());
+    if let Some(ref logger) = *audit_logger {
+        logger.log_server_started(env!("CARGO_PKG_VERSION"));
+        info!(
+            "Audit logging enabled: {:?} (level: {:?})",
+            config.audit.path, config.audit.level
+        );
+    }
+
+    // Initialize Iroh server with audit logger
+    let server = IrohServer::new(config.clone(), usb_bridge.clone(), audit_logger.clone())
         .await
         .context("Failed to initialize Iroh server")?;
 
@@ -239,6 +253,12 @@ async fn run_service(config: config::ServerConfig, usb_bridge: UsbBridge) -> Res
         }
     }
 
+    // Log server shutdown
+    if let Some(ref logger) = *audit_logger {
+        logger.log_server_stopped(Some("Ctrl+C received".to_string()));
+        logger.shutdown();
+    }
+
     // Notify systemd we're stopping
     service::notify_stopping().context("Failed to notify systemd stopping")?;
 
@@ -254,8 +274,18 @@ async fn run_service(config: config::ServerConfig, usb_bridge: UsbBridge) -> Res
 
 /// Run in TUI mode (interactive terminal UI)
 async fn run_tui(config: config::ServerConfig, usb_bridge: UsbBridge) -> Result<()> {
-    // Initialize Iroh server
-    let server = IrohServer::new(config.clone(), usb_bridge.clone())
+    // Initialize audit logger
+    let audit_logger = create_audit_logger(config.audit.clone());
+    if let Some(ref logger) = *audit_logger {
+        logger.log_server_started(env!("CARGO_PKG_VERSION"));
+        info!(
+            "Audit logging enabled: {:?} (level: {:?})",
+            config.audit.path, config.audit.level
+        );
+    }
+
+    // Initialize Iroh server with audit logger
+    let server = IrohServer::new(config.clone(), usb_bridge.clone(), audit_logger.clone())
         .await
         .context("Failed to initialize Iroh server")?;
 
@@ -279,6 +309,12 @@ async fn run_tui(config: config::ServerConfig, usb_bridge: UsbBridge) -> Result<
 
     // Run the TUI (this blocks until user quits)
     let tui_result = tui::run(endpoint_id, usb_bridge, network_rx, config.usb.auto_share).await;
+
+    // Log server shutdown
+    if let Some(ref logger) = *audit_logger {
+        logger.log_server_stopped(Some("TUI exit".to_string()));
+        logger.shutdown();
+    }
 
     // Note: Server task will be cleaned up when we return (dropped)
     // The Iroh endpoint's Drop implementation will close connections gracefully

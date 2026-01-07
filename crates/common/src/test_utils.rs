@@ -211,6 +211,13 @@ pub fn generate_test_id() -> u64 {
         .unwrap_or(0)
 }
 
+/// Generate a test endpoint ID (Iroh PublicKey) for testing purposes
+///
+/// Creates a random PublicKey that can be used as an endpoint ID in tests.
+pub fn generate_test_endpoint_id() -> iroh::PublicKey {
+    iroh::SecretKey::generate(&mut rand::thread_rng()).public()
+}
+
 /// Create a mock USB descriptor response (GET_DESCRIPTOR Device)
 ///
 /// Returns a standard 18-byte device descriptor

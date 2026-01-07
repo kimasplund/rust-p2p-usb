@@ -12,14 +12,14 @@
 //! Run with: `cargo test -p common --test usb_bridge_tests`
 
 use common::test_utils::{
-    create_mock_device_info, create_mock_device_list, with_timeout, DEFAULT_TEST_TIMEOUT,
+    DEFAULT_TEST_TIMEOUT, create_mock_device_info, create_mock_device_list, with_timeout,
 };
 use common::{UsbCommand, UsbEvent, create_usb_bridge};
 use protocol::{
     DeviceHandle, DeviceId, RequestId, TransferResult, TransferType, UsbRequest, UsbResponse,
 };
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread;
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -84,7 +84,9 @@ async fn test_list_devices_command_flow() {
     let handle = thread::spawn(move || {
         let cmd = worker.recv_command().expect("Failed to receive command");
         if let UsbCommand::ListDevices { response } = cmd {
-            response.send(expected_devices).expect("Failed to send response");
+            response
+                .send(expected_devices)
+                .expect("Failed to send response");
             true
         } else {
             false
@@ -412,6 +414,7 @@ async fn test_multiple_events_in_sequence() {
             match event {
                 UsbEvent::DeviceArrived { .. } => arrived_count += 1,
                 UsbEvent::DeviceLeft { .. } => left_count += 1,
+                _ => {} // Ignore other events in this test
             }
         }
     }
@@ -628,7 +631,10 @@ async fn test_event_channel_capacity() {
         // The channel has capacity of 256, try to fill it
         for i in 0..200 {
             let device = create_mock_device_info(i, 0x1000, 0x2000);
-            if worker.send_event(UsbEvent::DeviceArrived { device }).is_err() {
+            if worker
+                .send_event(UsbEvent::DeviceArrived { device })
+                .is_err()
+            {
                 return i; // Return how many we sent before error
             }
         }

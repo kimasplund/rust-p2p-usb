@@ -16,8 +16,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock, broadcast};
 use tokio::task::JoinHandle;
-use tokio::time::{interval_at, sleep, Instant};
+use tokio::time::{Instant, interval_at, sleep};
 use tracing::{debug, error, info, warn};
+
+use super::health::{HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, HealthMetrics, HealthMonitor};
 
 /// Device notification received from server via push
 #[derive(Debug, Clone)]
@@ -29,6 +31,12 @@ pub enum DeviceNotification {
         device_id: DeviceId,
         invalidated_handles: Vec<DeviceHandle>,
         reason: DeviceRemovalReason,
+    },
+    /// Device status/capability changed
+    DeviceStatusChanged {
+        device_id: DeviceId,
+        device_info: Option<DeviceInfo>,
+        reason: protocol::DeviceStatusChangeReason,
     },
 }
 
@@ -66,6 +74,8 @@ pub struct ServerConnection {
     shutdown: Arc<AtomicBool>,
     /// Broadcast channel for device notifications
     notification_tx: broadcast::Sender<DeviceNotification>,
+    /// Connection health monitor
+    health_monitor: Arc<HealthMonitor>,
 }
 
 impl ServerConnection {
@@ -82,6 +92,7 @@ impl ServerConnection {
         let next_request_id = Arc::new(AtomicU64::new(1));
         let shutdown = Arc::new(AtomicBool::new(false));
         let (notification_tx, _) = broadcast::channel(64);
+        let health_monitor = Arc::new(HealthMonitor::new());
 
         let conn = Self {
             server_id,
@@ -92,12 +103,13 @@ impl ServerConnection {
             next_request_id,
             shutdown: shutdown.clone(),
             notification_tx: notification_tx.clone(),
+            health_monitor: health_monitor.clone(),
         };
 
         // Establish initial connection
         conn.connect().await?;
 
-        // Spawn heartbeat task
+        // Spawn heartbeat task with health monitoring
         let conn_clone = Self {
             server_id: conn.server_id,
             server_addr: conn.server_addr.clone(),
@@ -107,17 +119,14 @@ impl ServerConnection {
             next_request_id: conn.next_request_id.clone(),
             shutdown: shutdown.clone(),
             notification_tx: notification_tx.clone(),
+            health_monitor: health_monitor.clone(),
         };
         tokio::spawn(async move {
             conn_clone.heartbeat_loop().await;
         });
 
         // Spawn notification listener task
-        Self::spawn_notification_listener(
-            connection.clone(),
-            notification_tx,
-            shutdown,
-        );
+        Self::spawn_notification_listener(connection.clone(), notification_tx, shutdown);
 
         Ok(conn)
     }
@@ -230,16 +239,14 @@ impl ServerConnection {
                     Ok(Ok(mut recv)) => {
                         // Read notification message
                         match protocol::read_framed_async(&mut recv).await {
-                            Ok(bytes) => {
-                                match decode_framed(&bytes) {
-                                    Ok(message) => {
-                                        Self::handle_notification(message.payload, &notification_tx);
-                                    }
-                                    Err(e) => {
-                                        warn!("Failed to decode notification: {}", e);
-                                    }
+                            Ok(bytes) => match decode_framed(&bytes) {
+                                Ok(message) => {
+                                    Self::handle_notification(message.payload, &notification_tx);
                                 }
-                            }
+                                Err(e) => {
+                                    warn!("Failed to decode notification: {}", e);
+                                }
+                            },
                             Err(e) => {
                                 debug!("Failed to read notification: {}", e);
                             }
@@ -258,10 +265,7 @@ impl ServerConnection {
         })
     }
 
-    fn handle_notification(
-        payload: MessagePayload,
-        tx: &broadcast::Sender<DeviceNotification>,
-    ) {
+    fn handle_notification(payload: MessagePayload, tx: &broadcast::Sender<DeviceNotification>) {
         match payload {
             MessagePayload::DeviceArrivedNotification { device } => {
                 info!("Received device arrived notification: {:?}", device.id);
@@ -278,6 +282,56 @@ impl ServerConnection {
                     invalidated_handles,
                     reason,
                 });
+            }
+            MessagePayload::DeviceStatusChangedNotification {
+                device_id,
+                device_info,
+                reason,
+            } => {
+                info!(
+                    "Received device status changed notification: {:?} ({:?})",
+                    device_id, reason
+                );
+                let _ = tx.send(DeviceNotification::DeviceStatusChanged {
+                    device_id,
+                    device_info,
+                    reason,
+                });
+            }
+            MessagePayload::AggregatedNotifications { notifications } => {
+                info!(
+                    "Received aggregated notification batch with {} items",
+                    notifications.len()
+                );
+                for notification in notifications {
+                    match notification {
+                        protocol::AggregatedNotification::Arrived(device) => {
+                            let _ = tx.send(DeviceNotification::DeviceArrived { device });
+                        }
+                        protocol::AggregatedNotification::Removed {
+                            device_id,
+                            invalidated_handles,
+                            reason,
+                        } => {
+                            let _ = tx.send(DeviceNotification::DeviceRemoved {
+                                device_id,
+                                invalidated_handles,
+                                reason,
+                            });
+                        }
+                        protocol::AggregatedNotification::StatusChanged {
+                            device_id,
+                            device_info,
+                            reason,
+                        } => {
+                            let _ = tx.send(DeviceNotification::DeviceStatusChanged {
+                                device_id,
+                                device_info,
+                                reason,
+                            });
+                        }
+                    }
+                }
             }
             _ => {
                 warn!("Unexpected notification payload: {:?}", payload);
@@ -314,13 +368,10 @@ impl ServerConnection {
         }
     }
 
-    /// Heartbeat loop - sends Ping every 30 seconds
+    /// Heartbeat loop - sends Heartbeat every 5 seconds for health monitoring
     async fn heartbeat_loop(&self) {
         // Delay first tick to allow capability exchange to complete first
-        let mut ticker = interval_at(
-            Instant::now() + Duration::from_secs(30),
-            Duration::from_secs(30),
-        );
+        let mut ticker = interval_at(Instant::now() + HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
 
         loop {
             ticker.tick().await;
@@ -335,25 +386,84 @@ impl ServerConnection {
                 continue;
             }
 
-            // Send ping
-            match self.send_ping().await {
-                Ok(()) => {
-                    debug!("Heartbeat ping successful");
+            // Send heartbeat with health monitoring
+            match self.send_heartbeat().await {
+                Ok(rtt_ms) => {
+                    if let Some(rtt) = rtt_ms {
+                        debug!("Heartbeat successful, RTT: {}ms", rtt);
+                    }
                 }
                 Err(e) => {
-                    warn!("Heartbeat ping failed: {}. Triggering reconnect", e);
+                    warn!("Heartbeat failed: {}. Recording failure.", e);
+                    self.health_monitor.record_failure().await;
 
-                    // Trigger reconnection
-                    if let Err(e) = self.reconnect().await {
-                        error!("Reconnection failed: {}", e);
-                        break;
+                    // Check if we've timed out
+                    if self.health_monitor.is_timed_out().await {
+                        warn!("Connection timed out, triggering reconnect");
+                        // Reset health monitor for reconnection attempt
+                        self.health_monitor.reset().await;
+
+                        // Trigger reconnection
+                        if let Err(e) = self.reconnect().await {
+                            error!("Reconnection failed: {}", e);
+                            break;
+                        }
                     }
                 }
             }
         }
     }
 
-    /// Send a ping message
+    /// Send a heartbeat message with RTT measurement
+    async fn send_heartbeat(&self) -> Result<Option<u64>> {
+        // Prepare heartbeat with sequence and timestamp
+        let (sequence, timestamp_ms) = self.health_monitor.prepare_heartbeat().await;
+
+        let message = Message {
+            version: CURRENT_VERSION,
+            payload: MessagePayload::Heartbeat {
+                sequence,
+                timestamp_ms,
+            },
+        };
+
+        // Send with timeout
+        let response = tokio::time::timeout(HEARTBEAT_TIMEOUT, self.send_message(message))
+            .await
+            .context("Heartbeat timeout")??;
+
+        match response.payload {
+            MessagePayload::HeartbeatAck {
+                sequence: ack_seq,
+                client_timestamp_ms,
+                server_timestamp_ms,
+            } => {
+                if ack_seq == sequence {
+                    let rtt = self
+                        .health_monitor
+                        .process_heartbeat_ack(ack_seq, client_timestamp_ms, server_timestamp_ms)
+                        .await;
+                    Ok(rtt)
+                } else {
+                    warn!(
+                        "Heartbeat sequence mismatch: expected {}, got {}",
+                        sequence, ack_seq
+                    );
+                    Ok(None)
+                }
+            }
+            // Fallback for servers that don't support Heartbeat yet
+            MessagePayload::Pong => {
+                debug!("Server responded with Pong (legacy), health monitoring limited");
+                Ok(None)
+            }
+            MessagePayload::Error { message } => Err(anyhow!("Server error: {}", message)),
+            _ => Err(anyhow!("Unexpected response to Heartbeat")),
+        }
+    }
+
+    /// Send a legacy ping message (for compatibility)
+    #[allow(dead_code)]
     async fn send_ping(&self) -> Result<()> {
         let message = Message {
             version: CURRENT_VERSION,
@@ -367,6 +477,16 @@ impl ServerConnection {
             MessagePayload::Error { message } => Err(anyhow!("Server error: {}", message)),
             _ => Err(anyhow!("Unexpected response to Ping")),
         }
+    }
+
+    /// Get current health metrics for this connection
+    pub async fn health_metrics(&self) -> HealthMetrics {
+        self.health_monitor.get_metrics().await
+    }
+
+    /// Get the health monitor for this connection
+    pub fn health_monitor(&self) -> Arc<HealthMonitor> {
+        self.health_monitor.clone()
     }
 
     /// Send a message and wait for response

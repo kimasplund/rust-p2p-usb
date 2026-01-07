@@ -642,6 +642,36 @@ impl IrohClient {
             .map(|conn| conn.subscribe_notifications())
     }
 
+    /// Get health metrics for a server connection
+    ///
+    /// Returns the current health metrics including RTT, packet loss,
+    /// connection quality, and health state. Returns None if not connected.
+    pub async fn get_health_metrics(
+        &self,
+        server_id: EndpointId,
+    ) -> Option<super::health::HealthMetrics> {
+        let connections = self.connections.lock().await;
+        if let Some(conn) = connections.get(&server_id) {
+            Some(conn.health_metrics().await)
+        } else {
+            None
+        }
+    }
+
+    /// Get health metrics for all connected servers
+    ///
+    /// Returns a map of server EndpointId to health metrics.
+    pub async fn get_all_health_metrics(
+        &self,
+    ) -> std::collections::HashMap<EndpointId, super::health::HealthMetrics> {
+        let connections = self.connections.lock().await;
+        let mut metrics = std::collections::HashMap::new();
+        for (server_id, conn) in connections.iter() {
+            metrics.insert(*server_id, conn.health_metrics().await);
+        }
+        metrics
+    }
+
     /// Shutdown the client gracefully
     ///
     /// Closes all connections and shuts down the Iroh endpoint.
@@ -683,7 +713,10 @@ impl IrohClient {
                 );
             }
             Err(e) => {
-                warn!("Capability exchange failed: {:#}, continuing without push notifications", e);
+                warn!(
+                    "Capability exchange failed: {:#}, continuing without push notifications",
+                    e
+                );
             }
         }
 
@@ -718,11 +751,19 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires valid NodeId creation which needs SecretKey
     async fn test_allowlist_management() {
-        // TODO: Implement this test with proper NodeId generation
-        // For now, allowlist functionality is tested indirectly
-        // via integration tests
+        use common::test_utils::generate_test_endpoint_id;
+
+        let config = ClientConfig::default();
+        let client = IrohClient::new(config).await.unwrap();
+
+        let server_id = generate_test_endpoint_id();
+
+        client.add_allowed_server(server_id).await;
+        assert!(client.is_server_allowed(&server_id).await);
+
+        client.remove_allowed_server(server_id).await;
+        assert!(client.is_server_allowed(&server_id).await);
     }
 
     #[tokio::test]

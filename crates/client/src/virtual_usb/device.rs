@@ -113,6 +113,7 @@ impl VirtualDevice {
 
         match response.result {
             protocol::TransferResult::Success { data } => Ok(data),
+            protocol::TransferResult::IsochronousSuccess { data, .. } => Ok(data),
             protocol::TransferResult::Error { error } => {
                 Err(anyhow::anyhow!("Control transfer failed: {:?}", error))
             }
@@ -147,6 +148,7 @@ impl VirtualDevice {
 
         match response.result {
             protocol::TransferResult::Success { data } => Ok(data),
+            protocol::TransferResult::IsochronousSuccess { data, .. } => Ok(data),
             protocol::TransferResult::Error { error } => {
                 Err(anyhow::anyhow!("Bulk transfer failed: {:?}", error))
             }
@@ -181,6 +183,7 @@ impl VirtualDevice {
 
         match response.result {
             protocol::TransferResult::Success { data } => Ok(data),
+            protocol::TransferResult::IsochronousSuccess { data, .. } => Ok(data),
             protocol::TransferResult::Error { error } => {
                 Err(anyhow::anyhow!("Interrupt transfer failed: {:?}", error))
             }

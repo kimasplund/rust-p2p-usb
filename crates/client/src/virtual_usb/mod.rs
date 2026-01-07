@@ -155,7 +155,10 @@ impl VirtualUsbManager {
     ///
     /// Used when a server connection is lost or intentionally closed.
     /// Returns the list of GlobalDeviceIds that were successfully detached.
-    pub async fn detach_all_from_server(&self, server_id: EndpointId) -> Result<Vec<GlobalDeviceId>> {
+    pub async fn detach_all_from_server(
+        &self,
+        server_id: EndpointId,
+    ) -> Result<Vec<GlobalDeviceId>> {
         self.inner.detach_all_from_server(server_id).await
     }
 
@@ -179,13 +182,19 @@ impl VirtualUsbManager {
     /// Returns a set of DeviceIds for devices currently attached via USB/IP from the given server.
     /// Used for reconciliation after reconnection to compare with server state.
     #[cfg(target_os = "linux")]
-    pub async fn get_attached_device_ids(&self, server_id: EndpointId) -> HashSet<protocol::DeviceId> {
+    pub async fn get_attached_device_ids(
+        &self,
+        server_id: EndpointId,
+    ) -> HashSet<protocol::DeviceId> {
         self.inner.get_attached_device_ids(server_id).await
     }
 
     /// Get the device IDs of all locally attached virtual devices for a specific server
     #[cfg(not(target_os = "linux"))]
-    pub async fn get_attached_device_ids(&self, _server_id: EndpointId) -> HashSet<protocol::DeviceId> {
+    pub async fn get_attached_device_ids(
+        &self,
+        _server_id: EndpointId,
+    ) -> HashSet<protocol::DeviceId> {
         HashSet::new()
     }
 
@@ -194,13 +203,19 @@ impl VirtualUsbManager {
     /// Returns a vector of (GlobalDeviceId, DeviceId) pairs for all attached devices from the server.
     /// Used for reconciliation to identify which devices to detach.
     #[cfg(target_os = "linux")]
-    pub async fn get_attached_device_info(&self, server_id: EndpointId) -> Vec<(GlobalDeviceId, protocol::DeviceId)> {
+    pub async fn get_attached_device_info(
+        &self,
+        server_id: EndpointId,
+    ) -> Vec<(GlobalDeviceId, protocol::DeviceId)> {
         self.inner.get_attached_device_info(server_id).await
     }
 
     /// Get detailed information about all attached virtual devices for a specific server
     #[cfg(not(target_os = "linux"))]
-    pub async fn get_attached_device_info(&self, _server_id: EndpointId) -> Vec<(GlobalDeviceId, protocol::DeviceId)> {
+    pub async fn get_attached_device_info(
+        &self,
+        _server_id: EndpointId,
+    ) -> Vec<(GlobalDeviceId, protocol::DeviceId)> {
         Vec::new()
     }
 

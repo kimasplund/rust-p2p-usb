@@ -592,7 +592,9 @@ mod tests {
                 assert_eq!(manager.next_handle_id, 1);
             }
             Err(_) => {
-                println!("Skipping test_device_id_assignment: USB context initialization failed (expected in sandbox)");
+                println!(
+                    "Skipping test_device_id_assignment: USB context initialization failed (expected in sandbox)"
+                );
             }
         }
     }

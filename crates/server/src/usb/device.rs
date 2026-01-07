@@ -3,7 +3,7 @@
 //! This module provides a wrapper around rusb::Device with cached descriptors
 //! and convenient conversion to protocol types.
 
-use protocol::{AttachError, DeviceId, DeviceInfo, DeviceSpeed};
+use protocol::{AttachError, DeviceId, DeviceInfo, DeviceSpeed, SuperSpeedConfig};
 use rusb::{Context, Device, DeviceDescriptor, DeviceHandle};
 use tracing::{debug, warn};
 
@@ -17,20 +17,37 @@ pub struct UsbDevice {
     descriptor: DeviceDescriptor,
     /// Device handle (if opened)
     handle: Option<DeviceHandle<Context>>,
+    /// Cached device speed for optimization decisions
+    speed: DeviceSpeed,
+    /// Transfer configuration based on device speed
+    transfer_config: SuperSpeedConfig,
 }
 
 impl UsbDevice {
     /// Create a new USB device wrapper
     ///
-    /// Reads and caches the device descriptor.
+    /// Reads and caches the device descriptor and determines optimal transfer
+    /// configuration based on device speed.
     pub fn new(device: Device<Context>, id: DeviceId) -> Result<Self, rusb::Error> {
         let descriptor = device.device_descriptor()?;
+        let speed = map_device_speed(device.speed());
+        let transfer_config = SuperSpeedConfig::for_speed(speed);
+
+        debug!(
+            "Creating USB device {:?} - speed: {:?}, max_bulk: {}KB, burst: {}",
+            id,
+            speed,
+            transfer_config.max_bulk_size / 1024,
+            transfer_config.enable_burst
+        );
 
         Ok(Self {
             device,
             id,
             descriptor,
             handle: None,
+            speed,
+            transfer_config,
         })
     }
 
@@ -47,6 +64,34 @@ impl UsbDevice {
     /// Get the device address
     pub fn device_address(&self) -> u8 {
         self.device.address()
+    }
+
+    /// Get the device speed
+    pub fn speed(&self) -> DeviceSpeed {
+        self.speed
+    }
+
+    /// Get the transfer configuration for this device
+    pub fn transfer_config(&self) -> &SuperSpeedConfig {
+        &self.transfer_config
+    }
+
+    /// Check if this is a SuperSpeed (USB 3.0+) device
+    pub fn is_superspeed(&self) -> bool {
+        self.speed.is_superspeed()
+    }
+
+    /// Get the maximum bulk transfer size for this device
+    ///
+    /// USB 3.0 SuperSpeed devices support up to 1MB transfers,
+    /// while USB 2.0 devices are limited to 64KB.
+    pub fn max_bulk_transfer_size(&self) -> usize {
+        self.transfer_config.max_bulk_size
+    }
+
+    /// Get the optimal URB buffer size for USB/IP transfers
+    pub fn optimal_urb_buffer_size(&self) -> usize {
+        self.transfer_config.urb_buffer_size
     }
 
     /// Convert to protocol DeviceInfo
@@ -74,7 +119,7 @@ impl UsbDevice {
             class: self.descriptor.class_code(),
             subclass: self.descriptor.sub_class_code(),
             protocol: self.descriptor.protocol_code(),
-            speed: map_device_speed(self.device.speed()),
+            speed: self.speed,
             num_configurations: self.descriptor.num_configurations(),
         }
     }
@@ -270,5 +315,21 @@ mod tests {
         let id1 = DeviceId(42);
         let id2 = id1;
         assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn test_superspeed_config_for_speed() {
+        let low_config = SuperSpeedConfig::for_speed(DeviceSpeed::Low);
+        assert_eq!(low_config.max_bulk_size, 4 * 1024);
+        assert!(!low_config.enable_burst);
+
+        let high_config = SuperSpeedConfig::for_speed(DeviceSpeed::High);
+        assert_eq!(high_config.max_bulk_size, 64 * 1024);
+        assert!(!high_config.enable_burst);
+
+        let super_config = SuperSpeedConfig::for_speed(DeviceSpeed::Super);
+        assert_eq!(super_config.max_bulk_size, 1024 * 1024);
+        assert!(super_config.enable_burst);
+        assert_eq!(super_config.urb_buffer_size, 256 * 1024);
     }
 }

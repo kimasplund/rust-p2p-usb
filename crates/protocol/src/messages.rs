@@ -8,8 +8,10 @@
 //! - Connection management (ping/pong, errors)
 
 use crate::types::{
-    AttachError, DetachError, DeviceHandle, DeviceId, DeviceInfo, DeviceRemovalReason,
-    UsbRequest, UsbResponse,
+    AggregatedNotification, AttachError, DetachError, DeviceHandle, DeviceId, DeviceInfo,
+    DeviceRemovalReason, DeviceSharingStatus, DeviceStatusChangeReason, ForceDetachReason,
+    LockResult, ProtocolMetrics, QueuePositionUpdate, ServerMetricsSummary, SharingMode,
+    UnlockResult, UsbRequest, UsbResponse,
 };
 use crate::version::ProtocolVersion;
 use serde::{Deserialize, Serialize};
@@ -81,11 +83,30 @@ pub enum MessagePayload {
     },
 
     // Connection management
-    /// Ping message for keep-alive
+    /// Ping message for keep-alive (legacy, use Heartbeat for health monitoring)
     Ping,
 
-    /// Pong response to ping
+    /// Pong response to ping (legacy, use HeartbeatAck for health monitoring)
     Pong,
+
+    /// Heartbeat message for connection health monitoring
+    /// Includes timestamp and sequence for RTT measurement
+    Heartbeat {
+        /// Sequence number for matching responses
+        sequence: u64,
+        /// Client timestamp in milliseconds since epoch (for RTT calculation)
+        timestamp_ms: u64,
+    },
+
+    /// Heartbeat acknowledgment from server
+    HeartbeatAck {
+        /// Echoed sequence number
+        sequence: u64,
+        /// Echoed client timestamp for RTT calculation
+        client_timestamp_ms: u64,
+        /// Server timestamp in milliseconds since epoch
+        server_timestamp_ms: u64,
+    },
 
     /// Protocol-level error message
     Error {
@@ -121,6 +142,123 @@ pub enum MessagePayload {
     ServerCapabilities {
         /// Server will send push notifications
         will_send_notifications: bool,
+    },
+
+    // Policy enforcement notifications (server -> client)
+    /// Notification that a device session is about to be forcibly ended (server -> client)
+    ///
+    /// Sent before the server forces a detach due to policy constraints.
+    /// Gives the client time to clean up gracefully before forced disconnect.
+    ForceDetachWarning {
+        /// Device handle being detached
+        handle: DeviceHandle,
+        /// Device ID
+        device_id: DeviceId,
+        /// Reason for forced detach
+        reason: ForceDetachReason,
+        /// Seconds until forced detach (0 = immediate)
+        seconds_until_detach: u32,
+    },
+
+    /// Notification that a device session was forcibly ended (server -> client)
+    ///
+    /// Sent after the server has forcibly detached a client from a device.
+    ForcedDetachNotification {
+        /// Device handle that was detached
+        handle: DeviceHandle,
+        /// Device ID
+        device_id: DeviceId,
+        /// Reason for forced detach
+        reason: ForceDetachReason,
+    },
+
+    /// Device capability/status changed notification (server -> client)
+    DeviceStatusChangedNotification {
+        /// Device ID that changed
+        device_id: DeviceId,
+        /// Updated device info (if still available)
+        device_info: Option<DeviceInfo>,
+        /// Reason for the status change
+        reason: DeviceStatusChangeReason,
+    },
+
+    /// Aggregated notification batch (server -> client)
+    AggregatedNotifications {
+        /// List of notifications in this batch
+        notifications: Vec<AggregatedNotification>,
+    },
+
+    // Metrics exchange
+    /// Request server metrics (client -> server)
+    GetMetricsRequest,
+
+    /// Response with server metrics (server -> client)
+    GetMetricsResponse {
+        /// Server metrics summary
+        metrics: ServerMetricsSummary,
+    },
+
+    /// Client metrics update (client -> server)
+    ClientMetricsUpdate {
+        /// Client's current metrics
+        metrics: ProtocolMetrics,
+    },
+
+    // Device sharing and lock management
+    /// Request sharing status for a device
+    GetSharingStatusRequest {
+        /// Device ID to query
+        device_id: DeviceId,
+    },
+
+    /// Response with device sharing status
+    GetSharingStatusResponse {
+        /// Sharing status if device exists
+        result: Result<DeviceSharingStatus, AttachError>,
+    },
+
+    /// Request to acquire lock on a device (for Shared/ReadOnly modes)
+    LockDeviceRequest {
+        /// Device handle (must be attached first)
+        handle: DeviceHandle,
+        /// Whether to request write access (only for ReadOnly mode)
+        write_access: bool,
+        /// Timeout in seconds (0 = no timeout)
+        timeout_secs: u32,
+    },
+
+    /// Response to lock request
+    LockDeviceResponse {
+        /// Lock result
+        result: LockResult,
+    },
+
+    /// Request to release lock on a device
+    UnlockDeviceRequest {
+        /// Device handle
+        handle: DeviceHandle,
+    },
+
+    /// Response to unlock request
+    UnlockDeviceResponse {
+        /// Unlock result
+        result: UnlockResult,
+    },
+
+    /// Notification when queue position changes (server -> client)
+    QueuePositionNotification {
+        /// Queue position update details
+        update: QueuePositionUpdate,
+    },
+
+    /// Notification when device becomes available (server -> client)
+    DeviceAvailableNotification {
+        /// Device ID that became available
+        device_id: DeviceId,
+        /// Device handle (for attached clients)
+        handle: DeviceHandle,
+        /// Current sharing mode
+        sharing_mode: SharingMode,
     },
 }
 

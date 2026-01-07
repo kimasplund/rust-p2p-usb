@@ -14,17 +14,19 @@ use ratatui::{
 use std::time::Duration;
 
 use super::app::{App, DeviceState, Dialog};
+use super::qr;
 
 /// Main render function
 ///
 /// Renders the complete UI based on current application state.
 pub fn render(frame: &mut Frame, app: &App) {
-    // Main layout: status bar (top), device list (center), help bar (bottom)
+    // Main layout: status bar (top), device list + metrics (center), help bar (bottom)
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Status bar
             Constraint::Min(10),   // Device list
+            Constraint::Length(8), // Metrics panel
             Constraint::Length(3), // Help bar
         ])
         .split(frame.area());
@@ -32,7 +34,8 @@ pub fn render(frame: &mut Frame, app: &App) {
     // Render each section
     render_status_bar(frame, app, chunks[0]);
     render_device_list(frame, app, chunks[1]);
-    render_help_bar(frame, chunks[2]);
+    render_metrics_panel(frame, app, chunks[2]);
+    render_help_bar(frame, chunks[3]);
 
     // Render dialog on top if open
     match app.dialog() {
@@ -41,6 +44,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Dialog::DeviceDetails => render_device_details_dialog(frame, app),
         Dialog::Clients => render_clients_dialog(frame, app),
         Dialog::ConfirmReset => render_confirm_reset_dialog(frame, app),
+        Dialog::QrCode => render_qr_code_dialog(frame, app),
     }
 }
 
@@ -177,6 +181,218 @@ fn create_device_row(device: &DeviceState, _is_selected: bool) -> Row<'static> {
     Row::new(cells)
 }
 
+/// Render the metrics panel
+fn render_metrics_panel(frame: &mut Frame, app: &App, area: Rect) {
+    let metrics = app.total_metrics();
+
+    // Split the metrics panel into columns
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(25), // Transfer stats
+            Constraint::Percentage(25), // Latency
+            Constraint::Percentage(25), // Throughput
+            Constraint::Percentage(25), // Connection quality
+        ])
+        .split(area);
+
+    // Transfer statistics
+    let transfer_lines = vec![
+        Line::from(vec![
+            Span::styled("Transfers: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}", metrics.transfers_completed),
+                Style::default().fg(Color::Green),
+            ),
+            Span::styled(" / ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{} failed", metrics.transfers_failed),
+                Style::default().fg(if metrics.transfers_failed > 0 {
+                    Color::Red
+                } else {
+                    Color::DarkGray
+                }),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Active: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}", metrics.active_transfers),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("TX: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                metrics.format_bytes_sent(),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("RX: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                metrics.format_bytes_received(),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+    ];
+
+    let transfer_block = Paragraph::new(transfer_lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(" Transfers ")
+            .title_style(Style::default().fg(Color::White)),
+    );
+    frame.render_widget(transfer_block, chunks[0]);
+
+    // Latency statistics
+    let latency_color = if metrics.latency.avg_us > 50_000 {
+        Color::Red
+    } else if metrics.latency.avg_us > 20_000 {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
+
+    let latency_lines = vec![
+        Line::from(vec![
+            Span::styled("Avg: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                metrics.latency.format_avg(),
+                Style::default().fg(latency_color),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Min: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                metrics.latency.format_min(),
+                Style::default().fg(Color::Green),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Max: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                metrics.latency.format_max(),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Samples: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}", metrics.latency.sample_count),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+    ];
+
+    let latency_block = Paragraph::new(latency_lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(" Latency ")
+            .title_style(Style::default().fg(Color::White)),
+    );
+    frame.render_widget(latency_block, chunks[1]);
+
+    // Throughput statistics
+    let throughput_lines = vec![
+        Line::from(vec![
+            Span::styled("TX Rate: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                metrics.format_throughput_tx(),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("RX Rate: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                metrics.format_throughput_rx(),
+                Style::default().fg(Color::Magenta),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Loss: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                metrics.format_loss_rate(),
+                Style::default().fg(if metrics.loss_rate > 0.01 {
+                    Color::Red
+                } else {
+                    Color::Green
+                }),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Retries: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}", metrics.retries),
+                Style::default().fg(if metrics.retries > 0 {
+                    Color::Yellow
+                } else {
+                    Color::DarkGray
+                }),
+            ),
+        ]),
+    ];
+
+    let throughput_block = Paragraph::new(throughput_lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(" Throughput ")
+            .title_style(Style::default().fg(Color::White)),
+    );
+    frame.render_widget(throughput_block, chunks[2]);
+
+    // Connection quality/clients
+    let quality = metrics.connection_quality();
+    let quality_label = metrics.connection_quality_label();
+    let quality_color = match quality {
+        90..=100 => Color::Green,
+        70..=89 => Color::LightGreen,
+        50..=69 => Color::Yellow,
+        30..=49 => Color::LightRed,
+        _ => Color::Red,
+    };
+
+    let bar_filled = (quality as usize * 10) / 100;
+    let bar_empty = 10 - bar_filled;
+    let quality_bar = format!("[{}{}]", "=".repeat(bar_filled), " ".repeat(bar_empty));
+
+    let quality_lines = vec![
+        Line::from(vec![
+            Span::styled("Quality: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(quality_label, Style::default().fg(quality_color)),
+        ]),
+        Line::from(vec![Span::styled(
+            format!("{}%", quality),
+            Style::default()
+                .fg(quality_color)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![Span::styled(
+            quality_bar,
+            Style::default().fg(quality_color),
+        )]),
+        Line::from(vec![
+            Span::styled("Clients: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}", app.connection_count()),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]),
+    ];
+
+    let quality_block = Paragraph::new(quality_lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(" Status ")
+            .title_style(Style::default().fg(Color::White)),
+    );
+    frame.render_widget(quality_block, chunks[3]);
+}
+
 /// Render the help bar (bottom panel)
 fn render_help_bar(frame: &mut Frame, area: Rect) {
     let help_text = vec![
@@ -200,7 +416,7 @@ fn render_help_bar(frame: &mut Frame, area: Rect) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" Toggle Share  "),
+        Span::raw(" Share  "),
         Span::styled(
             "Enter",
             Style::default()
@@ -215,6 +431,13 @@ fn render_help_bar(frame: &mut Frame, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" Clients  "),
+        Span::styled(
+            "Q",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" QR  "),
         Span::styled(
             "R",
             Style::default()
@@ -289,6 +512,10 @@ fn render_help_dialog(frame: &mut Frame) {
         Line::from(vec![
             Span::styled("  R            ", Style::default().fg(Color::Cyan)),
             Span::raw("Reset selected device"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Q            ", Style::default().fg(Color::Cyan)),
+            Span::raw("Show QR code for connection"),
         ]),
         Line::from(""),
         Line::from(vec![Span::styled(
@@ -590,6 +817,86 @@ fn render_confirm_reset_dialog(frame: &mut Frame, app: &App) {
                 .title_alignment(Alignment::Center)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Red)),
+        )
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(paragraph, area);
+}
+
+/// Render the QR code dialog
+fn render_qr_code_dialog(frame: &mut Frame, app: &App) {
+    // Calculate QR code dimensions to size the dialog appropriately
+    let (qr_width, qr_height) = qr::calculate_qr_dimensions(app.endpoint_id());
+
+    // Add padding for border, title, and endpoint text
+    let dialog_width = (qr_width + 4).max(50) as u16;
+    let dialog_height = (qr_height + 10) as u16;
+
+    // Calculate percentages based on terminal size
+    let term_area = frame.area();
+    let percent_x = ((dialog_width as u32 * 100) / term_area.width as u32).min(90) as u16;
+    let percent_y = ((dialog_height as u32 * 100) / term_area.height as u32).min(90) as u16;
+
+    let area = centered_rect(percent_x.max(50), percent_y.max(50), term_area);
+
+    let endpoint_id = app.endpoint_id();
+    let endpoint_str = endpoint_id.to_string();
+    let connection_url = qr::generate_connection_url(endpoint_id);
+
+    // Generate QR code lines
+    let qr_lines = qr::generate_qr_lines(endpoint_id);
+
+    // Build content: header, QR code, and footer with endpoint info
+    let mut content_lines = Vec::new();
+
+    // Header
+    content_lines.push(Line::from(vec![Span::styled(
+        "Scan to connect to this server",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )]));
+    content_lines.push(Line::from(""));
+
+    // QR Code lines (centered)
+    for qr_line in qr_lines {
+        content_lines.push(qr_line);
+    }
+
+    content_lines.push(Line::from(""));
+
+    // Connection URL
+    content_lines.push(Line::from(vec![
+        Span::styled("URL: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(connection_url, Style::default().fg(Color::Cyan)),
+    ]));
+
+    // Full EndpointId (truncated if needed)
+    let endpoint_display = if endpoint_str.len() > 50 {
+        format!("{}...", &endpoint_str[..47])
+    } else {
+        endpoint_str.clone()
+    };
+    content_lines.push(Line::from(vec![
+        Span::styled("EndpointId: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(endpoint_display, Style::default().fg(Color::Green)),
+    ]));
+
+    content_lines.push(Line::from(""));
+    content_lines.push(Line::from(vec![Span::styled(
+        "Press Esc or Q to close",
+        Style::default().fg(Color::DarkGray),
+    )]));
+
+    let paragraph = Paragraph::new(content_lines)
+        .block(
+            Block::default()
+                .title(" QR Code - Server Connection ")
+                .title_alignment(Alignment::Center)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
         )
         .alignment(Alignment::Center)
         .wrap(Wrap { trim: false });

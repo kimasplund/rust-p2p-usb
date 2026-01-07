@@ -1,12 +1,46 @@
 //! TUI application state
 //!
 //! Manages the application state including server connections, device lists,
-//! two-pane navigation, and popup dialogs.
+//! two-pane navigation, popup dialogs, and performance metrics.
 
-use crate::network::ConnectionState;
+use crate::network::{ConnectionQuality, ConnectionState, HealthMetrics, HealthState};
+use common::{MetricsSnapshot, TransferMetrics};
 use iroh::PublicKey as EndpointId;
 use protocol::{DeviceHandle, DeviceId, DeviceInfo};
 use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// Duration to show toast notifications (3 seconds)
+const TOAST_DURATION: Duration = Duration::from_secs(3);
+
+/// Maximum number of toasts to show at once
+const MAX_TOASTS: usize = 5;
+
+/// Toast notification type
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastType {
+    /// Informational toast
+    Info,
+    /// Success toast (e.g., device attached)
+    Success,
+    /// Warning toast (e.g., device removed)
+    Warning,
+    /// Error toast
+    Error,
+}
+
+/// A toast notification to display temporarily
+#[derive(Debug, Clone)]
+pub struct Toast {
+    /// Toast message
+    pub message: String,
+    /// Toast type for styling
+    pub toast_type: ToastType,
+    /// When the toast was created
+    pub created_at: Instant,
+}
 
 /// Server connection status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +84,10 @@ pub struct ServerInfo {
     pub device_count: usize,
     /// Error message if failed
     pub error: Option<String>,
+    /// Transfer metrics for this server connection
+    pub metrics: Arc<TransferMetrics>,
+    /// Connection health metrics (optional, updated periodically)
+    pub health: Option<HealthMetrics>,
 }
 
 /// Information about a remote device with local status
@@ -85,6 +123,8 @@ pub enum InputMode {
     Help,
     /// Confirm quit dialog
     ConfirmQuit,
+    /// Showing QR code for client EndpointId
+    QrCode,
 }
 
 /// User action to be processed by the main loop
@@ -112,6 +152,8 @@ pub enum AppAction {
     DeviceArrived(EndpointId, DeviceInfo),
     /// Device removed notification
     DeviceRemoved(EndpointId, DeviceId),
+    /// Device status changed notification
+    DeviceStatusChanged(EndpointId, DeviceId, Option<DeviceInfo>),
 }
 
 /// Main application state
@@ -136,6 +178,12 @@ pub struct App {
     pub status_message: Option<String>,
     /// Should quit flag
     pub should_quit: bool,
+    /// Toast notifications queue
+    pub toasts: VecDeque<Toast>,
+    /// Flag indicating device list changed recently (for visual indicator)
+    pub device_list_changed: bool,
+    /// When the device list last changed
+    pub device_list_changed_at: Option<Instant>,
 }
 
 impl App {
@@ -152,7 +200,45 @@ impl App {
             input_mode: InputMode::Normal,
             status_message: None,
             should_quit: false,
+            toasts: VecDeque::new(),
+            device_list_changed: false,
+            device_list_changed_at: None,
         }
+    }
+
+    /// Add a toast notification
+    pub fn add_toast(&mut self, message: String, toast_type: ToastType) {
+        // Remove oldest toast if at max
+        while self.toasts.len() >= MAX_TOASTS {
+            self.toasts.pop_front();
+        }
+
+        self.toasts.push_back(Toast {
+            message,
+            toast_type,
+            created_at: Instant::now(),
+        });
+    }
+
+    /// Remove expired toasts
+    pub fn cleanup_toasts(&mut self) {
+        let now = Instant::now();
+        self.toasts
+            .retain(|toast| now.duration_since(toast.created_at) < TOAST_DURATION);
+
+        // Also cleanup the device list changed indicator after a short time
+        if let Some(changed_at) = self.device_list_changed_at {
+            if now.duration_since(changed_at) > Duration::from_secs(2) {
+                self.device_list_changed = false;
+                self.device_list_changed_at = None;
+            }
+        }
+    }
+
+    /// Mark device list as changed (for visual indicator)
+    fn mark_device_list_changed(&mut self) {
+        self.device_list_changed = true;
+        self.device_list_changed_at = Some(Instant::now());
     }
 
     /// Add a server to the list
@@ -166,9 +252,110 @@ impl App {
                     status: ServerStatus::Disconnected,
                     device_count: 0,
                     error: None,
+                    metrics: Arc::new(TransferMetrics::new()),
+                    health: None,
                 },
             );
             self.server_order.push(endpoint_id);
+        }
+    }
+
+    /// Update health metrics for a server
+    pub fn update_server_health(&mut self, endpoint_id: &EndpointId, health: HealthMetrics) {
+        if let Some(server) = self.servers.get_mut(endpoint_id) {
+            server.health = Some(health);
+        }
+    }
+
+    /// Get metrics for a server
+    pub fn get_server_metrics(&self, endpoint_id: &EndpointId) -> Option<MetricsSnapshot> {
+        self.servers
+            .get(endpoint_id)
+            .map(|s| MetricsSnapshot::from_metrics(&s.metrics))
+    }
+
+    /// Get metrics for the selected server
+    pub fn selected_server_metrics(&self) -> Option<MetricsSnapshot> {
+        self.selected_server_id()
+            .and_then(|id| self.get_server_metrics(&id))
+    }
+
+    /// Get aggregated metrics across all connected servers
+    pub fn aggregated_metrics(&self) -> MetricsSnapshot {
+        let mut total_bytes_sent = 0u64;
+        let mut total_bytes_received = 0u64;
+        let mut total_transfers_completed = 0u64;
+        let mut total_transfers_failed = 0u64;
+        let mut total_retries = 0u64;
+        let mut total_active_transfers = 0u64;
+        let mut total_throughput_tx = 0.0f64;
+        let mut total_throughput_rx = 0.0f64;
+
+        let mut min_latency = u64::MAX;
+        let mut max_latency = 0u64;
+        let mut latency_sum = 0u64;
+        let mut latency_count = 0usize;
+
+        for server in self.servers.values() {
+            if server.status == ServerStatus::Connected {
+                let snapshot = MetricsSnapshot::from_metrics(&server.metrics);
+                total_bytes_sent += snapshot.bytes_sent;
+                total_bytes_received += snapshot.bytes_received;
+                total_transfers_completed += snapshot.transfers_completed;
+                total_transfers_failed += snapshot.transfers_failed;
+                total_retries += snapshot.retries;
+                total_active_transfers += snapshot.active_transfers;
+                total_throughput_tx += snapshot.throughput_tx_bps;
+                total_throughput_rx += snapshot.throughput_rx_bps;
+
+                if snapshot.latency.sample_count > 0 {
+                    min_latency = min_latency.min(snapshot.latency.min_us);
+                    max_latency = max_latency.max(snapshot.latency.max_us);
+                    latency_sum += snapshot.latency.avg_us * snapshot.latency.sample_count as u64;
+                    latency_count += snapshot.latency.sample_count;
+                }
+            }
+        }
+
+        let total = total_transfers_completed + total_transfers_failed;
+        let loss_rate = if total > 0 {
+            total_transfers_failed as f64 / total as f64
+        } else {
+            0.0
+        };
+
+        let retry_rate = if total_transfers_completed > 0 {
+            total_retries as f64 / total_transfers_completed as f64
+        } else {
+            0.0
+        };
+
+        MetricsSnapshot {
+            bytes_sent: total_bytes_sent,
+            bytes_received: total_bytes_received,
+            transfers_completed: total_transfers_completed,
+            transfers_failed: total_transfers_failed,
+            retries: total_retries,
+            active_transfers: total_active_transfers,
+            latency: common::LatencyStats {
+                min_us: if min_latency == u64::MAX {
+                    0
+                } else {
+                    min_latency
+                },
+                max_us: max_latency,
+                avg_us: if latency_count > 0 {
+                    latency_sum / latency_count as u64
+                } else {
+                    0
+                },
+                sample_count: latency_count,
+            },
+            throughput_tx_bps: total_throughput_tx,
+            throughput_rx_bps: total_throughput_rx,
+            loss_rate,
+            retry_rate,
+            uptime: None,
         }
     }
 
@@ -244,27 +431,84 @@ impl App {
 
     /// Add a single device to the list
     pub fn add_device(&mut self, endpoint_id: &EndpointId, device_info: DeviceInfo) {
-        let entry = self.devices.entry(*endpoint_id).or_default();
-        if !entry.iter().any(|d| d.info.id == device_info.id) {
-            entry.push(RemoteDevice {
-                info: device_info,
-                status: DeviceStatus::Available,
-                handle: None,
-                error: None,
-            });
-            if let Some(server) = self.servers.get_mut(endpoint_id) {
-                server.device_count = entry.len();
-            }
+        // Check if device already exists
+        let already_exists = self
+            .devices
+            .get(endpoint_id)
+            .is_some_and(|devices| devices.iter().any(|d| d.info.id == device_info.id));
+
+        if already_exists {
+            return;
         }
+
+        // Create toast notification before mutating devices
+        let device_name = device_info.product.clone().unwrap_or_else(|| {
+            format!(
+                "{:04x}:{:04x}",
+                device_info.vendor_id, device_info.product_id
+            )
+        });
+        self.add_toast(
+            format!("Device connected: {}", device_name),
+            ToastType::Success,
+        );
+
+        // Now add the device
+        let entry = self.devices.entry(*endpoint_id).or_default();
+        entry.push(RemoteDevice {
+            info: device_info,
+            status: DeviceStatus::Available,
+            handle: None,
+            error: None,
+        });
+        let device_count = entry.len();
+
+        if let Some(server) = self.servers.get_mut(endpoint_id) {
+            server.device_count = device_count;
+        }
+
+        // Mark device list as changed
+        self.mark_device_list_changed();
     }
 
     /// Remove a single device from the list
     pub fn remove_device(&mut self, endpoint_id: &EndpointId, device_id: DeviceId) {
         if let Some(devices) = self.devices.get_mut(endpoint_id) {
+            // Find device name before removing
+            let device_name = devices.iter().find(|d| d.info.id == device_id).map(|d| {
+                d.info.product.clone().unwrap_or_else(|| {
+                    format!("{:04x}:{:04x}", d.info.vendor_id, d.info.product_id)
+                })
+            });
+
             devices.retain(|d| d.info.id != device_id);
             let count = devices.len();
             if let Some(server) = self.servers.get_mut(endpoint_id) {
                 server.device_count = count;
+            }
+
+            // Add toast notification if device was found
+            if let Some(name) = device_name {
+                self.add_toast(format!("Device disconnected: {}", name), ToastType::Warning);
+                self.mark_device_list_changed();
+            }
+        }
+    }
+
+    /// Update device info (e.g., after capability change)
+    pub fn update_device_info(
+        &mut self,
+        endpoint_id: &EndpointId,
+        device_id: DeviceId,
+        new_info: Option<DeviceInfo>,
+    ) {
+        if let Some(devices) = self.devices.get_mut(endpoint_id) {
+            if let Some(device) = devices.iter_mut().find(|d| d.info.id == device_id) {
+                if let Some(info) = new_info {
+                    device.info = info;
+                    self.add_toast(format!("Device updated: {:?}", device_id), ToastType::Info);
+                    self.mark_device_list_changed();
+                }
             }
         }
     }
@@ -500,6 +744,11 @@ impl App {
     /// Show help overlay
     pub fn show_help(&mut self) {
         self.input_mode = InputMode::Help;
+    }
+
+    /// Show QR code for client EndpointId (for server approval)
+    pub fn show_qr_code(&mut self) {
+        self.input_mode = InputMode::QrCode;
     }
 
     /// Show quit confirmation

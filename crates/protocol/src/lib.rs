@@ -60,7 +60,11 @@ pub use codec::{read_framed_async, write_framed_async};
 pub use error::{ProtocolError, Result};
 pub use messages::{Message, MessagePayload};
 pub use types::{
-    AttachError, DetachError, DeviceHandle, DeviceId, DeviceInfo, DeviceRemovalReason, DeviceSpeed,
-    RequestId, TransferResult, TransferType, UsbError, UsbRequest, UsbResponse,
+    AggregatedNotification, AttachError, ClientMetrics, DetachError, DeviceHandle, DeviceId,
+    DeviceInfo, DeviceMetrics, DeviceRemovalReason, DeviceSharingStatus, DeviceSpeed,
+    DeviceStatusChangeReason, ForceDetachReason, IsoPacketDescriptor, IsoPacketResult, LockResult,
+    ProtocolLatencyStats, ProtocolMetrics, QueuePositionUpdate, RequestId, ServerMetricsSummary,
+    SharingMode, SuperSpeedConfig, TransferResult, TransferType, UnlockResult, UsbError,
+    UsbRequest, UsbResponse,
 };
 pub use version::{CURRENT_VERSION, ProtocolVersion};

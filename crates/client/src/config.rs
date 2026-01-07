@@ -53,7 +53,12 @@ impl ServerConfig {
     /// Returns true if:
     /// - auto_attach is empty and auto_connect is Full (attach all)
     /// - Device matches any pattern in auto_attach
-    pub fn should_auto_attach(&self, vendor_id: u16, product_id: u16, product_name: Option<&str>) -> bool {
+    pub fn should_auto_attach(
+        &self,
+        vendor_id: u16,
+        product_id: u16,
+        product_name: Option<&str>,
+    ) -> bool {
         // If auto_attach is empty, behavior depends on auto_connect mode
         if self.auto_attach.is_empty() {
             return self.auto_connect == AutoConnectMode::AutoWithDevices;
@@ -155,8 +160,12 @@ impl ClientConfig {
     /// Manual auto-connect mode. Servers in `configured` take precedence.
     pub fn all_servers(&self) -> Vec<ServerConfig> {
         let mut servers: Vec<ServerConfig> = self.servers.configured.clone();
-        let configured_ids: std::collections::HashSet<String> =
-            self.servers.configured.iter().map(|s| s.node_id.clone()).collect();
+        let configured_ids: std::collections::HashSet<String> = self
+            .servers
+            .configured
+            .iter()
+            .map(|s| s.node_id.clone())
+            .collect();
 
         // Add legacy servers that aren't already in configured
         for node_id in &self.servers.approved_servers {
@@ -175,21 +184,31 @@ impl ClientConfig {
 
     /// Find server configuration by node ID
     pub fn find_server(&self, node_id: &str) -> Option<&ServerConfig> {
-        self.servers.configured.iter().find(|s| s.node_id == node_id)
+        self.servers
+            .configured
+            .iter()
+            .find(|s| s.node_id == node_id)
     }
 
     /// Get the effective auto-connect mode for a server
     pub fn effective_auto_connect(&self, server: &ServerConfig) -> AutoConnectMode {
         // Global override takes precedence if set
-        self.client.global_auto_connect.unwrap_or(server.auto_connect)
+        self.client
+            .global_auto_connect
+            .unwrap_or(server.auto_connect)
     }
 
     /// Get servers that should auto-connect on startup
     pub fn auto_connect_servers(&self) -> Vec<&ServerConfig> {
-        self.servers.configured.iter()
+        self.servers
+            .configured
+            .iter()
             .filter(|s| {
                 let mode = self.effective_auto_connect(s);
-                matches!(mode, AutoConnectMode::Auto | AutoConnectMode::AutoWithDevices)
+                matches!(
+                    mode,
+                    AutoConnectMode::Auto | AutoConnectMode::AutoWithDevices
+                )
             })
             .collect()
     }
@@ -342,7 +361,10 @@ mod tests {
         let parsed: ClientConfig = toml::from_str(&toml_str).unwrap();
 
         assert_eq!(config.client.log_level, parsed.client.log_level);
-        assert_eq!(config.client.global_auto_connect, parsed.client.global_auto_connect);
+        assert_eq!(
+            config.client.global_auto_connect,
+            parsed.client.global_auto_connect
+        );
     }
 
     #[test]
@@ -369,7 +391,10 @@ mod tests {
         let mut config = ClientConfig::default();
 
         // Add legacy server
-        config.servers.approved_servers.push("legacy-server-id".to_string());
+        config
+            .servers
+            .approved_servers
+            .push("legacy-server-id".to_string());
 
         // Add configured server
         config.servers.configured.push(ServerConfig {
@@ -383,12 +408,18 @@ mod tests {
         assert_eq!(all.len(), 2);
 
         // Check configured server preserves settings
-        let configured = all.iter().find(|s| s.node_id == "configured-server-id").unwrap();
+        let configured = all
+            .iter()
+            .find(|s| s.node_id == "configured-server-id")
+            .unwrap();
         assert_eq!(configured.name, Some("pi5-kim".to_string()));
         assert_eq!(configured.auto_connect, AutoConnectMode::Auto);
 
         // Check legacy server gets default settings
-        let legacy = all.iter().find(|s| s.node_id == "legacy-server-id").unwrap();
+        let legacy = all
+            .iter()
+            .find(|s| s.node_id == "legacy-server-id")
+            .unwrap();
         assert!(legacy.name.is_none());
         assert_eq!(legacy.auto_connect, AutoConnectMode::Manual);
     }
@@ -422,11 +453,17 @@ mod tests {
         });
 
         // Without global override, uses per-server setting
-        assert_eq!(config.effective_auto_connect(&config.servers.configured[0]), AutoConnectMode::Manual);
+        assert_eq!(
+            config.effective_auto_connect(&config.servers.configured[0]),
+            AutoConnectMode::Manual
+        );
 
         // With global override, overrides per-server setting
         config.client.global_auto_connect = Some(AutoConnectMode::AutoWithDevices);
-        assert_eq!(config.effective_auto_connect(&config.servers.configured[0]), AutoConnectMode::AutoWithDevices);
+        assert_eq!(
+            config.effective_auto_connect(&config.servers.configured[0]),
+            AutoConnectMode::AutoWithDevices
+        );
     }
 
     #[test]
@@ -464,10 +501,16 @@ mod tests {
             auto_attach: Vec::new(),
         });
 
-        assert_eq!(config.server_display_name("abcdefghijklmnopqrstuvwxyz123456"), "pi5-kim");
+        assert_eq!(
+            config.server_display_name("abcdefghijklmnopqrstuvwxyz123456"),
+            "pi5-kim"
+        );
 
         // Unknown server with long ID gets truncated
-        assert_eq!(config.server_display_name("unknownserver123456789"), "unknownserve...");
+        assert_eq!(
+            config.server_display_name("unknownserver123456789"),
+            "unknownserve..."
+        );
 
         // Short unknown server ID shown in full
         assert_eq!(config.server_display_name("short"), "short");

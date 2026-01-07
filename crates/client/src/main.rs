@@ -128,7 +128,14 @@ async fn main() -> Result<()> {
 
     // Handle specific connection request or run TUI
     let result = if let Some(server_id_str) = args.connect {
-        connect_and_run(client, virtual_usb.clone(), &server_id_str, &config, args.headless).await
+        connect_and_run(
+            client,
+            virtual_usb.clone(),
+            &server_id_str,
+            &config,
+            args.headless,
+        )
+        .await
     } else {
         run_tui_mode(client, virtual_usb.clone(), &config).await
     };
@@ -177,8 +184,11 @@ fn resolve_server_id(server_str: &str, config: &config::ClientConfig) -> Result<
         return Ok(endpoint_id);
     }
 
-    debug!("Looking up server '{}' in {} configured servers",
-           server_str, config.servers.configured.len());
+    debug!(
+        "Looking up server '{}' in {} configured servers",
+        server_str,
+        config.servers.configured.len()
+    );
 
     // Look up by name in configured servers
     for server in &config.servers.configured {
@@ -238,8 +248,7 @@ async fn connect_and_run(
     info!("Successfully connected to server");
 
     // Track previously attached devices for auto-reattach
-    let previously_attached: Arc<RwLock<HashSet<DeviceId>>> =
-        Arc::new(RwLock::new(HashSet::new()));
+    let previously_attached: Arc<RwLock<HashSet<DeviceId>>> = Arc::new(RwLock::new(HashSet::new()));
 
     // Get server config for auto-attach filtering
     let server_config = config.find_server(&server_id.to_string());
@@ -259,8 +268,13 @@ async fn connect_and_run(
 
                     // Check if this device should be auto-attached
                     let should_attach = server_config
-                        .map(|s| s.should_auto_attach(device.vendor_id, device.product_id, product_name))
-                        .unwrap_or(matches!(effective_mode, config::AutoConnectMode::AutoWithDevices));
+                        .map(|s| {
+                            s.should_auto_attach(device.vendor_id, device.product_id, product_name)
+                        })
+                        .unwrap_or(matches!(
+                            effective_mode,
+                            config::AutoConnectMode::AutoWithDevices
+                        ));
 
                     let status_prefix = if should_attach { "[auto]" } else { "[skip]" };
                     info!(
@@ -327,12 +341,21 @@ async fn connect_and_run(
     // If headless mode, wait for Ctrl+C; otherwise launch TUI
     if headless {
         info!("Running in headless mode. Press Ctrl+C to shutdown.");
-        signal::ctrl_c().await.context("Failed to wait for Ctrl+C")?;
+        signal::ctrl_c()
+            .await
+            .context("Failed to wait for Ctrl+C")?;
         info!("Received Ctrl+C, shutting down...");
     } else {
         // Check if TUI mode should be launched
-        let launch_tui = config.client.global_auto_connect
-            .map(|mode| matches!(mode, config::AutoConnectMode::Auto | config::AutoConnectMode::AutoWithDevices))
+        let launch_tui = config
+            .client
+            .global_auto_connect
+            .map(|mode| {
+                matches!(
+                    mode,
+                    config::AutoConnectMode::Auto | config::AutoConnectMode::AutoWithDevices
+                )
+            })
             .unwrap_or(true);
 
         if launch_tui {
@@ -394,17 +417,24 @@ async fn handle_notifications(
                 let was_attached = previously_attached.read().await.contains(&device.id);
 
                 // Check if this device matches auto_attach filter
-                let matches_filter = server_config.as_ref().map(|s| {
-                    s.should_auto_attach(
-                        device.vendor_id,
-                        device.product_id,
-                        device.product.as_deref(),
-                    )
-                }).unwrap_or(false);
+                let matches_filter = server_config
+                    .as_ref()
+                    .map(|s| {
+                        s.should_auto_attach(
+                            device.vendor_id,
+                            device.product_id,
+                            device.product.as_deref(),
+                        )
+                    })
+                    .unwrap_or(false);
 
                 // Auto-attach if previously attached OR matches auto_attach filter
                 if was_attached || matches_filter {
-                    let reason = if was_attached { "previously attached" } else { "matches auto_attach filter" };
+                    let reason = if was_attached {
+                        "previously attached"
+                    } else {
+                        "matches auto_attach filter"
+                    };
                     info!(
                         "Auto-attaching device {:?} ({:04x}:{:04x}) - {}",
                         device.id, device.vendor_id, device.product_id, reason
@@ -424,10 +454,7 @@ async fn handle_notifications(
                                 previously_attached.write().await.insert(device.id);
                             }
                             Err(e) => {
-                                warn!(
-                                    "Auto-attach failed for device {:?}: {:#}",
-                                    device.id, e
-                                );
+                                warn!("Auto-attach failed for device {:?}: {:#}", device.id, e);
                             }
                         },
                         Err(e) => {
@@ -463,6 +490,18 @@ async fn handle_notifications(
                     warn!("Error during device cleanup: {}", e);
                 }
             }
+            Ok(DeviceNotification::DeviceStatusChanged {
+                device_id,
+                device_info,
+                reason,
+            }) => {
+                info!(
+                    "Device {:?} status changed: {:?}, info: {:?}",
+                    device_id,
+                    reason,
+                    device_info.as_ref().map(|d| &d.id)
+                );
+            }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                 warn!("Missed {} device notifications", n);
             }
@@ -479,15 +518,16 @@ async fn handle_notifications(
 /// This callback is invoked after successful reconnection to a server.
 /// It compares the server's current device list with locally attached devices
 /// and cleans up any stale local state.
-async fn setup_reconciliation_callback(client: &Arc<IrohClient>, virtual_usb: Arc<VirtualUsbManager>) {
+async fn setup_reconciliation_callback(
+    client: &Arc<IrohClient>,
+    virtual_usb: Arc<VirtualUsbManager>,
+) {
     let virtual_usb_clone = virtual_usb.clone();
 
     let callback: network::ReconciliationCallback = Arc::new(move |server_id, server_devices| {
         let virtual_usb = virtual_usb_clone.clone();
 
-        Box::pin(async move {
-            reconcile_devices(server_id, server_devices, &virtual_usb).await
-        })
+        Box::pin(async move { reconcile_devices(server_id, server_devices, &virtual_usb).await })
     });
 
     client.set_reconciliation_callback(callback).await;

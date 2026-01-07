@@ -36,6 +36,8 @@ pub enum Action {
     ViewClients,
     /// Show help dialog
     ShowHelp,
+    /// Show QR code dialog
+    ShowQrCode,
     /// Close dialog/popup
     CloseDialog,
     /// Refresh device list
@@ -51,7 +53,7 @@ pub enum Action {
 impl From<KeyEvent> for Action {
     fn from(key: KeyEvent) -> Self {
         match key.code {
-            // Quit
+            // Quit (lowercase q)
             KeyCode::Char('q') => Action::Quit,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Action::Quit,
             KeyCode::Esc => Action::CloseDialog,
@@ -66,6 +68,7 @@ impl From<KeyEvent> for Action {
             KeyCode::Char('y') => Action::Confirm,
             KeyCode::Char('c') => Action::ViewClients,
             KeyCode::Char('?') => Action::ShowHelp,
+            KeyCode::Char('Q') => Action::ShowQrCode, // Uppercase Q for QR code
             KeyCode::Char('r') => Action::Refresh,
             KeyCode::Char('R') => Action::ResetDevice,
 

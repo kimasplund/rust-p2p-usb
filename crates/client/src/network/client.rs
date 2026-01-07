@@ -13,7 +13,7 @@ use tokio::sync::{Mutex, RwLock, broadcast};
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
 
-use super::connection::ServerConnection;
+use super::connection::{DeviceNotification, ServerConnection};
 use super::device_proxy::DeviceProxy;
 
 /// Connection state for a server
@@ -474,6 +474,20 @@ impl IrohClient {
     pub async fn connected_servers(&self) -> Vec<EndpointId> {
         let connections = self.connections.lock().await;
         connections.keys().copied().collect()
+    }
+
+    /// Subscribe to device notifications from a server
+    ///
+    /// Returns a broadcast receiver for device arrival/removal notifications.
+    /// Returns None if not connected to the specified server.
+    pub async fn subscribe_notifications(
+        &self,
+        server_id: EndpointId,
+    ) -> Option<broadcast::Receiver<DeviceNotification>> {
+        let connections = self.connections.lock().await;
+        connections
+            .get(&server_id)
+            .map(|conn| conn.subscribe_notifications())
     }
 
     /// Shutdown the client gracefully

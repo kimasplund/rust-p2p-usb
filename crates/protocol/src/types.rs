@@ -220,6 +220,21 @@ pub enum DetachError {
     Other { message: String },
 }
 
+/// Reason for device removal in hotplug notification
+///
+/// Indicates why a device was removed from the server.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DeviceRemovalReason {
+    /// Physical device was unplugged
+    Unplugged,
+    /// Server is shutting down
+    ServerShutdown,
+    /// Device error (USB reset failed, etc.)
+    DeviceError { message: String },
+    /// Administrative action (operator removed sharing)
+    AdminAction,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +270,16 @@ mod tests {
 
         assert_eq!(err1, err2);
         assert_ne!(err1, err3);
+    }
+
+    #[test]
+    fn test_device_removal_reason() {
+        let reasons = [
+            DeviceRemovalReason::Unplugged,
+            DeviceRemovalReason::ServerShutdown,
+            DeviceRemovalReason::AdminAction,
+            DeviceRemovalReason::DeviceError { message: "test".to_string() },
+        ];
+        assert_eq!(reasons.len(), 4);
     }
 }

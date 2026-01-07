@@ -453,6 +453,8 @@ async fn test_usb_bridge_device_left_event() {
         worker
             .send_event(UsbEvent::DeviceLeft {
                 device_id: DeviceId(42),
+                invalidated_handles: Vec::new(),
+                affected_clients: Vec::new(),
             })
             .expect("Failed to send");
     });
@@ -462,7 +464,7 @@ async fn test_usb_bridge_device_left_event() {
     assert!(result.is_ok());
 
     let event = result.unwrap().expect("Failed to receive");
-    if let UsbEvent::DeviceLeft { device_id } = event {
+    if let UsbEvent::DeviceLeft { device_id, .. } = event {
         assert_eq!(device_id.0, 42);
     } else {
         panic!("Wrong event type");

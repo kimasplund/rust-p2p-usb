@@ -39,7 +39,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::device::VirtualDevice;
 use super::socket_bridge::SocketBridge;
@@ -403,6 +403,66 @@ impl LinuxVirtualUsbManager {
         }
 
         Ok(status)
+    }
+
+    /// Handle remote device removal by cleaning up associated virtual devices
+    ///
+    /// Called when a remote device is disconnected or removed from the server.
+    /// This method gracefully detaches all virtual devices that were created
+    /// for the removed remote device.
+    pub async fn handle_device_removed(
+        &self,
+        device_id: protocol::DeviceId,
+        invalidated_handles: Vec<protocol::DeviceHandle>,
+    ) -> Result<Vec<protocol::DeviceHandle>> {
+        info!(
+            "Remote device {:?} removed, cleaning up {} virtual devices",
+            device_id,
+            invalidated_handles.len()
+        );
+
+        let mut detached = Vec::new();
+
+        for handle in invalidated_handles {
+            match self.force_detach(handle).await {
+                Ok(()) => {
+                    info!("Successfully detached virtual device handle {}", handle.0);
+                    detached.push(handle);
+                }
+                Err(e) => {
+                    warn!("Failed to detach device handle {}: {}", handle.0, e);
+                }
+            }
+        }
+
+        Ok(detached)
+    }
+
+    /// Force detach a device (for cleanup after notification)
+    ///
+    /// This is more lenient than `detach_device` - it won't fail if
+    /// the device is already partially detached.
+    async fn force_detach(&self, handle: protocol::DeviceHandle) -> Result<()> {
+        let devices = self.attached_devices.read().await;
+
+        if let Some(device) = devices.get(&handle) {
+            let port = device.vhci_port();
+            drop(devices);
+
+            if let Some(bridge) = self.socket_bridges.write().await.remove(&handle) {
+                bridge.stop();
+            }
+
+            if let Err(e) = self.detach_from_vhci(port).await {
+                debug!("VHCI detach note (may be already detached): {}", e);
+            }
+
+            self.free_port(port).await;
+        }
+
+        self.attached_devices.write().await.remove(&handle);
+
+        Ok(())
     }
 }
 

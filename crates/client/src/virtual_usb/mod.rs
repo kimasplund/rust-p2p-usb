@@ -112,4 +112,18 @@ impl VirtualUsbManager {
     pub async fn list_devices(&self) -> Vec<DeviceHandle> {
         self.inner.list_devices().await
     }
+
+    /// Handle device removal notification from server
+    ///
+    /// Automatically detaches virtual devices when the remote device is removed.
+    /// Returns the list of handles that were successfully detached.
+    pub async fn handle_device_removed(
+        &self,
+        device_id: protocol::DeviceId,
+        invalidated_handles: Vec<protocol::DeviceHandle>,
+    ) -> Result<Vec<protocol::DeviceHandle>> {
+        self.inner
+            .handle_device_removed(device_id, invalidated_handles)
+            .await
+    }
 }

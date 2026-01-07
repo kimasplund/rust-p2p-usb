@@ -217,9 +217,11 @@ impl DeviceManager {
     /// Handle device removal (from hot-plug callback)
     pub fn handle_device_left(&mut self, bus: u8, address: u8) {
         if let Some(device_id) = self.remove_device(bus, address)
-            && let Err(e) = self
-                .event_sender
-                .send_blocking(UsbEvent::DeviceLeft { device_id })
+            && let Err(e) = self.event_sender.send_blocking(UsbEvent::DeviceLeft {
+                device_id,
+                invalidated_handles: Vec::new(), // TODO: Phase 3 will populate this
+                affected_clients: Vec::new(),    // TODO: Phase 3 will populate this
+            })
         {
             error!("Failed to send DeviceLeft event: {}", e);
         }

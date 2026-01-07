@@ -3,7 +3,7 @@
 //! Manages per-client state, handles protocol messages, and maintains
 //! the communication bridge between the client and USB subsystem.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use common::UsbBridge;
 use common::{UsbCommand, UsbEvent};
 use iroh::PublicKey as EndpointId;
@@ -12,6 +12,7 @@ use protocol::{
     CURRENT_VERSION, DeviceHandle, DeviceId, Message, MessagePayload, UsbRequest, decode_framed,
     encode_framed, validate_version,
 };
+use protocol::types::DeviceRemovalReason;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::time;
@@ -39,6 +40,8 @@ pub struct ClientConnection {
     attached_devices: HashMap<DeviceHandle, DeviceId>,
     /// Last activity timestamp (for keep-alive)
     last_activity: Instant,
+    /// Client supports push notifications (determined during capability exchange)
+    client_supports_push: bool,
 }
 
 impl ClientConnection {
@@ -50,7 +53,42 @@ impl ClientConnection {
             usb_bridge,
             attached_devices: HashMap::new(),
             last_activity: Instant::now(),
+            client_supports_push: false,
         }
+    }
+
+    /// Exchange capabilities with client
+    async fn exchange_capabilities(&mut self) -> Result<()> {
+        // Wait for client capabilities on a bidirectional stream
+        let (mut send, mut recv) = tokio::time::timeout(
+            Duration::from_secs(10),
+            self.connection.accept_bi()
+        ).await.context("Timeout waiting for capability exchange")?
+            .context("Failed to accept capability exchange stream")?;
+
+        let message_bytes = protocol::read_framed_async(&mut recv).await
+            .context("Failed to read client capabilities")?;
+        let message: Message = decode_framed(&message_bytes)?;
+
+        if let MessagePayload::ClientCapabilities { supports_push_notifications } = message.payload {
+            self.client_supports_push = supports_push_notifications;
+            info!("Client capabilities: push_notifications={}", supports_push_notifications);
+        } else {
+            return Err(anyhow!("Expected ClientCapabilities, got {:?}", message.payload));
+        }
+
+        // Send server capabilities
+        let response = Message {
+            version: CURRENT_VERSION,
+            payload: MessagePayload::ServerCapabilities {
+                will_send_notifications: true,
+            },
+        };
+        let response_bytes = encode_framed(&response)?;
+        protocol::write_framed_async(&mut send, &response_bytes).await?;
+        send.finish().context("Failed to finish capability response")?;
+
+        Ok(())
     }
 
     /// Run the connection handler
@@ -59,6 +97,11 @@ impl ClientConnection {
     /// closes or an error occurs.
     pub async fn run(&mut self) -> Result<()> {
         info!("Starting connection handler for {}", self.endpoint_id);
+
+        // Exchange capabilities with client
+        if let Err(e) = self.exchange_capabilities().await {
+            warn!("Capability exchange failed: {:#}, continuing without push notifications", e);
+        }
 
         // Spawn keep-alive task
         let connection_clone = self.connection.clone();
@@ -301,31 +344,80 @@ impl ClientConnection {
         Ok(MessagePayload::TransferComplete { response })
     }
 
+    /// Send a push notification via unidirectional QUIC stream
+    async fn send_push_notification(&self, payload: MessagePayload) -> Result<()> {
+        if !self.client_supports_push {
+            debug!("Client does not support push notifications, skipping");
+            return Ok(());
+        }
+
+        // Open unidirectional stream (server -> client)
+        let mut send = self.connection.open_uni().await
+            .context("Failed to open unidirectional stream for notification")?;
+
+        let message = Message {
+            version: CURRENT_VERSION,
+            payload,
+        };
+
+        let framed = encode_framed(&message)?;
+        protocol::write_framed_async(&mut send, &framed).await?;
+        send.finish().context("Failed to finish notification stream")?;
+
+        debug!("Push notification sent successfully");
+        Ok(())
+    }
+
     /// Handle USB events from the USB subsystem
     async fn handle_usb_event(&mut self, event: UsbEvent) -> Result<()> {
         match event {
             UsbEvent::DeviceArrived { device } => {
                 debug!("Device arrived: {:?}", device.id);
-                // Could notify client if needed
+                // Send push notification to client
+                if let Err(e) = self.send_push_notification(
+                    MessagePayload::DeviceArrivedNotification { device }
+                ).await {
+                    warn!("Failed to send device arrived notification: {:#}", e);
+                }
             }
 
-            UsbEvent::DeviceLeft { device_id } => {
-                info!("Device left: {:?}", device_id);
+            UsbEvent::DeviceLeft { device_id, invalidated_handles, affected_clients } => {
+                info!(
+                    "Device left: {:?}, invalidated_handles={:?}, affected_clients={:?}",
+                    device_id, invalidated_handles, affected_clients
+                );
 
-                // Find and remove all handles for this device
-                let handles: Vec<DeviceHandle> = self
+                // Remove invalidated handles from our attached devices map
+                for handle in &invalidated_handles {
+                    if self.attached_devices.remove(handle).is_some() {
+                        info!("Auto-detached device: handle={:?}", handle);
+                    }
+                }
+
+                // Also check for any handles we track that weren't in invalidated_handles
+                // (fallback for consistency)
+                let remaining_handles: Vec<DeviceHandle> = self
                     .attached_devices
                     .iter()
                     .filter(|(_, id)| **id == device_id)
                     .map(|(handle, _)| *handle)
                     .collect();
 
-                for handle in handles {
+                for handle in remaining_handles {
                     self.attached_devices.remove(&handle);
-                    info!("Auto-detached device: handle={:?}", handle);
+                    info!("Auto-detached device (fallback): handle={:?}", handle);
                 }
 
-                // Could send notification to client
+                // Send push notification to client
+                if let Err(e) = self.send_push_notification(
+                    MessagePayload::DeviceRemovedNotification {
+                        device_id,
+                        invalidated_handles,
+                        reason: DeviceRemovalReason::Unplugged,
+                    }
+                ).await {
+                    warn!("Failed to send device removed notification: {:#}", e);
+                }
             }
         }
 

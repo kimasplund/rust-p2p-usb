@@ -9,3 +9,4 @@ pub mod session;
 
 // Re-export public types
 pub use client::{ClientConfig, ConnectionState, IrohClient};
+pub use connection::DeviceNotification;

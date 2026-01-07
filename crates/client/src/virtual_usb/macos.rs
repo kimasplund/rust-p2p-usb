@@ -62,4 +62,13 @@ impl MacOsVirtualUsbManager {
     pub async fn list_devices(&self) -> Vec<DeviceHandle> {
         Vec::new()
     }
+
+    /// Handle device removal notification (not implemented)
+    pub async fn handle_device_removed(
+        &self,
+        _device_id: protocol::DeviceId,
+        _invalidated_handles: Vec<protocol::DeviceHandle>,
+    ) -> Result<Vec<protocol::DeviceHandle>> {
+        Err(anyhow!("macOS virtual USB not implemented"))
+    }
 }

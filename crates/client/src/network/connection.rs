@@ -7,15 +7,30 @@ use anyhow::{Context, Result, anyhow};
 use common::ALPN_PROTOCOL;
 use iroh::{Endpoint, EndpointAddr, PublicKey as EndpointId};
 use protocol::{
-    CURRENT_VERSION, DeviceHandle, DeviceId, DeviceInfo, Message, MessagePayload, RequestId,
-    UsbRequest, UsbResponse, decode_framed, encode_framed, validate_version,
+    CURRENT_VERSION, DeviceHandle, DeviceId, DeviceInfo, DeviceRemovalReason, Message,
+    MessagePayload, RequestId, UsbRequest, UsbResponse, decode_framed, encode_framed,
+    validate_version,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, broadcast};
+use tokio::task::JoinHandle;
 use tokio::time::{interval, sleep};
 use tracing::{debug, error, info, warn};
+
+/// Device notification received from server via push
+#[derive(Debug, Clone)]
+pub enum DeviceNotification {
+    /// Device was connected on server
+    DeviceArrived { device: DeviceInfo },
+    /// Device was removed from server
+    DeviceRemoved {
+        device_id: DeviceId,
+        invalidated_handles: Vec<DeviceHandle>,
+        reason: DeviceRemovalReason,
+    },
+}
 
 /// Connection state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +64,8 @@ pub struct ServerConnection {
     next_request_id: Arc<AtomicU64>,
     /// Shutdown flag
     shutdown: Arc<AtomicBool>,
+    /// Broadcast channel for device notifications
+    notification_tx: broadcast::Sender<DeviceNotification>,
 }
 
 impl ServerConnection {
@@ -64,6 +81,7 @@ impl ServerConnection {
         let connection = Arc::new(Mutex::new(None));
         let next_request_id = Arc::new(AtomicU64::new(1));
         let shutdown = Arc::new(AtomicBool::new(false));
+        let (notification_tx, _) = broadcast::channel(64);
 
         let conn = Self {
             server_id,
@@ -73,6 +91,7 @@ impl ServerConnection {
             connection: connection.clone(),
             next_request_id,
             shutdown: shutdown.clone(),
+            notification_tx: notification_tx.clone(),
         };
 
         // Establish initial connection
@@ -87,10 +106,18 @@ impl ServerConnection {
             connection: connection.clone(),
             next_request_id: conn.next_request_id.clone(),
             shutdown: shutdown.clone(),
+            notification_tx: notification_tx.clone(),
         };
         tokio::spawn(async move {
             conn_clone.heartbeat_loop().await;
         });
+
+        // Spawn notification listener task
+        Self::spawn_notification_listener(
+            connection.clone(),
+            notification_tx,
+            shutdown,
+        );
 
         Ok(conn)
     }
@@ -165,6 +192,126 @@ impl ServerConnection {
     /// Check if connected
     pub async fn is_connected(&self) -> bool {
         *self.state.read().await == ConnectionState::Connected
+    }
+
+    /// Subscribe to device notifications from this server
+    pub fn subscribe_notifications(&self) -> broadcast::Receiver<DeviceNotification> {
+        self.notification_tx.subscribe()
+    }
+
+    /// Spawn a task to listen for push notifications via unidirectional streams
+    #[allow(dead_code)]
+    fn spawn_notification_listener(
+        connection: Arc<Mutex<Option<iroh::endpoint::Connection>>>,
+        notification_tx: broadcast::Sender<DeviceNotification>,
+        shutdown: Arc<AtomicBool>,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                if shutdown.load(Ordering::Relaxed) {
+                    debug!("Notification listener shutting down");
+                    break;
+                }
+
+                // Get connection if available
+                let conn = {
+                    let guard = connection.lock().await;
+                    guard.clone()
+                };
+
+                let Some(conn) = conn else {
+                    // Not connected, wait and retry
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                };
+
+                // Accept unidirectional stream with timeout
+                match tokio::time::timeout(Duration::from_secs(1), conn.accept_uni()).await {
+                    Ok(Ok(mut recv)) => {
+                        // Read notification message
+                        match protocol::read_framed_async(&mut recv).await {
+                            Ok(bytes) => {
+                                match decode_framed(&bytes) {
+                                    Ok(message) => {
+                                        Self::handle_notification(message.payload, &notification_tx);
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to decode notification: {}", e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                debug!("Failed to read notification: {}", e);
+                            }
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        // Connection error - may be closing
+                        debug!("Uni stream accept error: {}", e);
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    Err(_) => {
+                        // Timeout - normal, just continue
+                    }
+                }
+            }
+        })
+    }
+
+    fn handle_notification(
+        payload: MessagePayload,
+        tx: &broadcast::Sender<DeviceNotification>,
+    ) {
+        match payload {
+            MessagePayload::DeviceArrivedNotification { device } => {
+                info!("Received device arrived notification: {:?}", device.id);
+                let _ = tx.send(DeviceNotification::DeviceArrived { device });
+            }
+            MessagePayload::DeviceRemovedNotification {
+                device_id,
+                invalidated_handles,
+                reason,
+            } => {
+                info!("Received device removed notification: {:?}", device_id);
+                let _ = tx.send(DeviceNotification::DeviceRemoved {
+                    device_id,
+                    invalidated_handles,
+                    reason,
+                });
+            }
+            _ => {
+                warn!("Unexpected notification payload: {:?}", payload);
+            }
+        }
+    }
+
+    /// Send client capabilities and receive server capabilities
+    ///
+    /// This should be called after establishing the connection to negotiate
+    /// push notification support with the server.
+    pub async fn send_client_capabilities(&self) -> Result<bool> {
+        let message = Message {
+            version: CURRENT_VERSION,
+            payload: MessagePayload::ClientCapabilities {
+                supports_push_notifications: true,
+            },
+        };
+
+        let response = self.send_message(message).await?;
+
+        match response.payload {
+            MessagePayload::ServerCapabilities {
+                will_send_notifications,
+            } => {
+                debug!(
+                    "Server capabilities received: will_send_notifications={}",
+                    will_send_notifications
+                );
+                Ok(will_send_notifications)
+            }
+            MessagePayload::Error { message } => Err(anyhow!("Server error: {}", message)),
+            _ => Err(anyhow!("Unexpected response to ClientCapabilities")),
+        }
     }
 
     /// Heartbeat loop - sends Ping every 30 seconds

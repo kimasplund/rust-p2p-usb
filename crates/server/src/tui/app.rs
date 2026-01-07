@@ -282,7 +282,7 @@ impl App {
                     self.device_order.push(id);
                 }
             }
-            UsbEvent::DeviceLeft { device_id } => {
+            UsbEvent::DeviceLeft { device_id, .. } => {
                 let id = device_id.0;
                 info!("Device left: {}", id);
                 self.devices.remove(&id);
@@ -543,6 +543,8 @@ mod tests {
         // Remove device
         app.handle_usb_event(UsbEvent::DeviceLeft {
             device_id: DeviceId(42),
+            invalidated_handles: vec![],
+            affected_clients: vec![],
         });
         assert!(app.devices.is_empty());
         assert!(app.device_order.is_empty());

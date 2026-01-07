@@ -44,19 +44,23 @@ pub enum UsbCommand {
     Shutdown,
 }
 
-/// Events from USB thread to Tokio runtime
+/// USB events from the device manager
 #[derive(Debug, Clone)]
 pub enum UsbEvent {
     /// Device hot-plugged (connected)
     DeviceArrived {
-        /// Device information
+        /// Full device information
         device: protocol::DeviceInfo,
     },
 
-    /// Device removed (disconnected)
+    /// Device removed with affected handles
     DeviceLeft {
-        /// Device ID that was removed
+        /// ID of the removed device
         device_id: protocol::DeviceId,
+        /// Handles that were invalidated
+        invalidated_handles: Vec<protocol::DeviceHandle>,
+        /// Client IDs that need to be notified
+        affected_clients: Vec<String>,
     },
 }
 

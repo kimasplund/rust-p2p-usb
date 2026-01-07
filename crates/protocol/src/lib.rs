@@ -60,7 +60,7 @@ pub use codec::{read_framed_async, write_framed_async};
 pub use error::{ProtocolError, Result};
 pub use messages::{Message, MessagePayload};
 pub use types::{
-    AttachError, DetachError, DeviceHandle, DeviceId, DeviceInfo, DeviceSpeed, RequestId,
-    TransferResult, TransferType, UsbError, UsbRequest, UsbResponse,
+    AttachError, DetachError, DeviceHandle, DeviceId, DeviceInfo, DeviceRemovalReason, DeviceSpeed,
+    RequestId, TransferResult, TransferType, UsbError, UsbRequest, UsbResponse,
 };
 pub use version::{CURRENT_VERSION, ProtocolVersion};

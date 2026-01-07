@@ -12,10 +12,10 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use common::setup_logging;
 use iroh::PublicKey as EndpointId;
-use network::{ClientConfig as NetworkClientConfig, IrohClient};
+use network::{ClientConfig as NetworkClientConfig, DeviceNotification, IrohClient};
 use std::sync::Arc;
 use tokio::signal;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use virtual_usb::VirtualUsbManager;
 
 #[derive(Parser, Debug)]
@@ -222,6 +222,15 @@ async fn connect_and_run(
         }
     }
 
+    // Subscribe to device notifications from server
+    if let Some(notification_rx) = client.subscribe_notifications(server_id).await {
+        let virtual_usb_clone = virtual_usb.clone();
+        tokio::spawn(handle_notifications(notification_rx, virtual_usb_clone));
+        info!("Subscribed to device notifications from server");
+    } else {
+        warn!("Failed to subscribe to device notifications (connection may be closed)");
+    }
+
     // If headless mode, wait for Ctrl+C; otherwise launch TUI
     if headless {
         info!("Running in headless mode. Press Ctrl+C to shutdown.");
@@ -262,4 +271,41 @@ async fn run_tui_mode(
 
     // Run the TUI - it handles all the cleanup internally
     tui::run(client, virtual_usb, config).await
+}
+
+/// Handle device notifications from server
+async fn handle_notifications(
+    mut notification_rx: tokio::sync::broadcast::Receiver<DeviceNotification>,
+    virtual_usb: Arc<VirtualUsbManager>,
+) {
+    loop {
+        match notification_rx.recv().await {
+            Ok(DeviceNotification::DeviceArrived { device }) => {
+                info!(
+                    "Device arrived on server: {:?} ({:04x}:{:04x})",
+                    device.id, device.vendor_id, device.product_id
+                );
+            }
+            Ok(DeviceNotification::DeviceRemoved {
+                device_id,
+                invalidated_handles,
+                reason,
+            }) => {
+                info!("Device {:?} removed from server: {:?}", device_id, reason);
+                if let Err(e) = virtual_usb
+                    .handle_device_removed(device_id, invalidated_handles)
+                    .await
+                {
+                    warn!("Error during device cleanup: {}", e);
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                warn!("Missed {} device notifications", n);
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                debug!("Notification channel closed");
+                break;
+            }
+        }
+    }
 }

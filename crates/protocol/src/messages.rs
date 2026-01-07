@@ -8,7 +8,8 @@
 //! - Connection management (ping/pong, errors)
 
 use crate::types::{
-    AttachError, DetachError, DeviceHandle, DeviceId, DeviceInfo, UsbRequest, UsbResponse,
+    AttachError, DetachError, DeviceHandle, DeviceId, DeviceInfo, DeviceRemovalReason,
+    UsbRequest, UsbResponse,
 };
 use crate::version::ProtocolVersion;
 use serde::{Deserialize, Serialize};
@@ -90,6 +91,36 @@ pub enum MessagePayload {
     Error {
         /// Human-readable error message
         message: String,
+    },
+
+    // Hotplug notifications (server -> client, via unidirectional stream)
+    /// Device was hot-plugged (connected) on server
+    DeviceArrivedNotification {
+        /// Full device information
+        device: DeviceInfo,
+    },
+
+    /// Device was hot-unplugged (disconnected) on server
+    DeviceRemovedNotification {
+        /// ID of the removed device
+        device_id: DeviceId,
+        /// Handles that are now invalid
+        invalidated_handles: Vec<DeviceHandle>,
+        /// Reason for removal
+        reason: DeviceRemovalReason,
+    },
+
+    // Capability negotiation (bidirectional, on connection)
+    /// Client announces supported features
+    ClientCapabilities {
+        /// Client supports push notifications
+        supports_push_notifications: bool,
+    },
+
+    /// Server announces supported features
+    ServerCapabilities {
+        /// Server will send push notifications
+        will_send_notifications: bool,
     },
 }
 

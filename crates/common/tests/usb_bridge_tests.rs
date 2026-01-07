@@ -353,7 +353,11 @@ async fn test_device_left_event_flow() {
     // Worker thread sends event
     let handle = thread::spawn(move || {
         worker
-            .send_event(UsbEvent::DeviceLeft { device_id })
+            .send_event(UsbEvent::DeviceLeft {
+                device_id,
+                invalidated_handles: Vec::new(),
+                affected_clients: Vec::new(),
+            })
             .expect("Failed to send event");
     });
 
@@ -362,7 +366,7 @@ async fn test_device_left_event_flow() {
     assert!(result.is_ok());
 
     let event = result.unwrap().expect("Failed to receive event");
-    if let UsbEvent::DeviceLeft { device_id } = event {
+    if let UsbEvent::DeviceLeft { device_id, .. } = event {
         assert_eq!(device_id.0, 42);
     } else {
         panic!("Wrong event type");
@@ -391,6 +395,8 @@ async fn test_multiple_events_in_sequence() {
             worker
                 .send_event(UsbEvent::DeviceLeft {
                     device_id: DeviceId(i),
+                    invalidated_handles: Vec::new(),
+                    affected_clients: Vec::new(),
                 })
                 .expect("Failed to send event");
         }

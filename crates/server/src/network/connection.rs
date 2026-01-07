@@ -10,8 +10,9 @@ use iroh::PublicKey as EndpointId;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 
 use protocol::{
-    CURRENT_VERSION, DeviceHandle, DeviceId, DeviceRemovalReason, Message, MessagePayload,
-    RequestId, TransferType, UsbRequest, decode_framed, encode_framed, validate_version,
+    AttachError, CURRENT_VERSION, DeviceHandle, DeviceId, DeviceRemovalReason, ForceDetachReason,
+    Message, MessagePayload, RequestId, TransferType, UsbRequest, decode_framed, encode_framed,
+    validate_version,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,6 +23,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::audit::{AuditResult, SharedAuditLogger};
 use crate::network::notification_aggregator::{NotificationAggregator, PendingNotification};
+use crate::policy::{PolicyDecision, PolicyDenialReason, PolicyEngine};
 
 /// Timeout for receiving messages (2 minutes)
 const MESSAGE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -66,6 +68,10 @@ pub struct ClientConnection {
     rate_limiter: Option<SharedRateLimiter>,
     /// Notification aggregator for batching rapid device events
     notification_aggregator: NotificationAggregator,
+    /// Policy engine for access control
+    policy_engine: Arc<PolicyEngine>,
+    /// Device info cache for policy checks (device_id -> device_info)
+    device_info_cache: HashMap<DeviceId, protocol::DeviceInfo>,
 }
 
 impl ClientConnection {
@@ -76,6 +82,7 @@ impl ClientConnection {
         usb_bridge: UsbBridge,
         audit_logger: SharedAuditLogger,
         rate_limiter: Option<SharedRateLimiter>,
+        policy_engine: Arc<PolicyEngine>,
     ) -> Self {
         Self {
             endpoint_id,
@@ -88,6 +95,8 @@ impl ClientConnection {
             audit_logger,
             rate_limiter,
             notification_aggregator: NotificationAggregator::new(),
+            policy_engine,
+            device_info_cache: HashMap::new(),
         }
     }
 
@@ -205,12 +214,17 @@ impl ClientConnection {
                     }
                 }
 
-                // Timeout check (connection idle too long)
-                _ = time::sleep(Duration::from_secs(60)) => {
+                // Check for expired sessions (every 30 seconds)
+                _ = time::sleep(Duration::from_secs(30)) => {
                     let idle_time = self.last_activity.elapsed();
                     if idle_time > Duration::from_secs(180) {
                         warn!("Connection idle for {:?}, closing", idle_time);
                         break;
+                    }
+
+                    // Check for expired sessions belonging to this client
+                    if let Err(e) = self.handle_expired_sessions().await {
+                        warn!("Failed to handle expired sessions: {:#}", e);
                     }
                 }
             }
@@ -363,6 +377,65 @@ impl ClientConnection {
             device_id, self.endpoint_id
         );
 
+        // Get device info for policy check (from cache or fetch)
+        let device_info = if let Some(info) = self.device_info_cache.get(&device_id) {
+            info.clone()
+        } else {
+            // Fetch device list to get info
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            self.usb_bridge
+                .send_command(UsbCommand::ListDevices { response: tx })
+                .await?;
+            let devices = rx.await?;
+
+            // Update cache with all devices
+            for dev in &devices {
+                self.device_info_cache.insert(dev.id, dev.clone());
+            }
+
+            match devices.into_iter().find(|d| d.id == device_id) {
+                Some(info) => info,
+                None => {
+                    return Ok(MessagePayload::AttachDeviceResponse {
+                        result: Err(AttachError::DeviceNotFound),
+                    });
+                }
+            }
+        };
+
+        // Check policy before attaching
+        let policy_decision = self.policy_engine.check_access(&self.endpoint_id, &device_info);
+        match policy_decision {
+            PolicyDecision::Allow => {
+                // Policy allows access, continue with attach
+            }
+            PolicyDecision::Deny(reason) => {
+                let endpoint_id_str = self.endpoint_id.to_string();
+                let attach_error = Self::policy_denial_to_attach_error(&reason);
+
+                warn!(
+                    "Policy denied attach for device {:?} from {}: {}",
+                    device_id, endpoint_id_str, reason
+                );
+
+                // Audit log: policy denied attach
+                if let Some(ref logger) = *self.audit_logger {
+                    logger.log_device_attach(
+                        &endpoint_id_str,
+                        device_id,
+                        None,
+                        None,
+                        AuditResult::Failure,
+                        Some(format!("Policy denied: {}", reason)),
+                    );
+                }
+
+                return Ok(MessagePayload::AttachDeviceResponse {
+                    result: Err(attach_error),
+                });
+            }
+        }
+
         // Send command to USB subsystem
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.usb_bridge
@@ -385,6 +458,11 @@ impl ClientConnection {
                     "Device attached: handle={:?}, device={:?}",
                     handle, device_id
                 );
+
+                // Register session with policy engine for duration/time window monitoring
+                self.policy_engine
+                    .register_session(*handle, device_id, &device_info, self.endpoint_id)
+                    .await;
 
                 // Audit log: successful attach
                 if let Some(ref logger) = *self.audit_logger {
@@ -416,6 +494,38 @@ impl ClientConnection {
         Ok(MessagePayload::AttachDeviceResponse { result })
     }
 
+    /// Convert policy denial reason to AttachError
+    fn policy_denial_to_attach_error(reason: &PolicyDenialReason) -> AttachError {
+        match reason {
+            PolicyDenialReason::ClientNotAllowed => AttachError::PolicyDenied {
+                reason: "Client not in allowed list for this device".to_string(),
+            },
+            PolicyDenialReason::OutsideTimeWindow {
+                current_time,
+                allowed_windows,
+            } => AttachError::OutsideTimeWindow {
+                current_time: current_time.clone(),
+                allowed_windows: allowed_windows.clone(),
+            },
+            PolicyDenialReason::SessionDurationExceeded { max_duration } => {
+                AttachError::PolicyDenied {
+                    reason: format!(
+                        "Session would exceed maximum duration of {:?}",
+                        max_duration
+                    ),
+                }
+            }
+            PolicyDenialReason::DeviceClassRestricted { device_class } => {
+                AttachError::DeviceClassRestricted {
+                    device_class: *device_class,
+                }
+            }
+            PolicyDenialReason::NoMatchingPolicy => AttachError::PolicyDenied {
+                reason: "No matching policy found for this device".to_string(),
+            },
+        }
+    }
+
     /// Handle DetachDeviceRequest
     async fn handle_detach_device(&mut self, handle: DeviceHandle) -> Result<MessagePayload> {
         info!(
@@ -443,6 +553,9 @@ impl ClientConnection {
         if result.is_ok() {
             self.attached_devices.remove(&handle);
             info!("Device detached: handle={:?}", handle);
+
+            // Unregister session from policy engine
+            self.policy_engine.unregister_session(handle).await;
 
             // Audit log: successful detach
             if let Some(ref logger) = *self.audit_logger {
@@ -923,6 +1036,116 @@ impl ClientConnection {
         }
 
         cancelled
+    }
+
+    /// Handle expired sessions for this client
+    ///
+    /// Checks all attached devices for session expiration and force-detaches
+    /// any that have exceeded their time limits or are outside time windows.
+    async fn handle_expired_sessions(&mut self) -> Result<()> {
+        // Check all expired sessions - the policy engine tracks them
+        let expired = self.policy_engine.check_expired_sessions().await;
+
+        if expired.is_empty() {
+            return Ok(());
+        }
+
+        // Process expired sessions
+        for event in expired {
+                // Only handle events for this client
+                if event.client_id != self.endpoint_id {
+                    continue;
+                }
+
+                // Only handle events for handles we're tracking
+                if !self.attached_devices.contains_key(&event.handle) {
+                    continue;
+                }
+
+                info!(
+                    "Session expired for device {:?} (handle {:?}): {:?}",
+                    event.device_id, event.handle, event.reason
+                );
+
+                // Force detach the device
+                let device_id = self.attached_devices.remove(&event.handle);
+
+                // Send detach command to USB subsystem
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                if let Err(e) = self
+                    .usb_bridge
+                    .send_command(UsbCommand::DetachDevice {
+                        handle: event.handle,
+                        response: tx,
+                    })
+                    .await
+                {
+                    warn!("Failed to send detach command for expired session: {:#}", e);
+                    continue;
+                }
+
+                // Wait for response (don't block too long)
+                match tokio::time::timeout(Duration::from_secs(5), rx).await {
+                    Ok(Ok(Ok(()))) => {
+                        info!("Force-detached expired device {:?}", event.handle);
+                    }
+                    Ok(Ok(Err(e))) => {
+                        warn!("Force-detach failed: {:?}", e);
+                    }
+                    Ok(Err(_)) => {
+                        warn!("Force-detach response channel closed");
+                    }
+                    Err(_) => {
+                        warn!("Force-detach response timeout");
+                    }
+                }
+
+                // Unregister from policy engine
+                self.policy_engine.unregister_session(event.handle).await;
+
+                // Convert reason to ForceDetachReason
+                let reason = match event.reason {
+                    crate::policy::SessionExpiredReason::DurationLimitReached => {
+                        ForceDetachReason::SessionDurationLimitReached {
+                            duration_secs: 0, // Session duration not tracked in event
+                            max_duration_secs: 0, // Max duration not tracked in event
+                        }
+                    }
+                    crate::policy::SessionExpiredReason::TimeWindowExpired => {
+                        ForceDetachReason::TimeWindowExpired {
+                            current_time: "expired".to_string(),
+                            next_window: None, // Next window not tracked in event
+                        }
+                    }
+                };
+
+                // Send notification to client
+                if self.client_supports_push {
+                    let notification = MessagePayload::ForcedDetachNotification {
+                        handle: event.handle,
+                        device_id: event.device_id,
+                        reason,
+                    };
+
+                    if let Err(e) = self.send_push_notification(notification).await {
+                        warn!("Failed to send force-detach notification: {:#}", e);
+                    }
+                }
+
+                // Audit log
+                let endpoint_id_str = self.endpoint_id.to_string();
+                if let Some(ref logger) = *self.audit_logger {
+                    logger.log_device_detach(
+                        &endpoint_id_str,
+                        event.handle,
+                        device_id,
+                        AuditResult::Success,
+                        Some(format!("Session expired: {:?}", event.reason)),
+                    );
+                }
+            }
+
+        Ok(())
     }
 
     /// Keep-alive task: sends periodic pings

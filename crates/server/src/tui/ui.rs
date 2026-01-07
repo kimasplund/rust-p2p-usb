@@ -3,7 +3,7 @@
 //! Implements the visual layout and rendering for the server TUI.
 //! Uses ratatui widgets for the device table, status bar, and dialogs.
 
-use protocol::DeviceSpeed;
+use protocol::{DeviceSpeed, SharingMode};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -91,7 +91,7 @@ fn render_device_list(frame: &mut Frame, app: &App, area: Rect) {
     let devices = app.devices();
 
     // Table header
-    let header_cells = ["ID", "VID:PID", "Name", "Status", "Clients"]
+    let header_cells = ["ID", "VID:PID", "Name", "Mode", "Status", "Clients", "Time"]
         .iter()
         .map(|h| {
             Cell::from(*h).style(
@@ -118,9 +118,11 @@ fn render_device_list(frame: &mut Frame, app: &App, area: Rect) {
         [
             Constraint::Length(4),  // ID
             Constraint::Length(10), // VID:PID
-            Constraint::Min(20),    // Name
+            Constraint::Min(15),    // Name
+            Constraint::Length(4),  // Mode (E/S/R)
             Constraint::Length(10), // Status
             Constraint::Length(8),  // Clients
+            Constraint::Length(8),  // Time remaining
         ],
     )
     .header(header)
@@ -149,6 +151,13 @@ fn render_device_list(frame: &mut Frame, app: &App, area: Rect) {
 fn create_device_row(device: &DeviceState, _is_selected: bool) -> Row<'static> {
     let info = &device.info;
 
+    // Sharing mode styling (E/S/R for Exclusive/Shared/ReadOnly)
+    let (mode_char, mode_style) = match device.sharing_mode {
+        SharingMode::Exclusive => ("E", Style::default().fg(Color::Red)),
+        SharingMode::Shared => ("S", Style::default().fg(Color::Cyan)),
+        SharingMode::ReadOnly => ("R", Style::default().fg(Color::Yellow)),
+    };
+
     // Status styling
     let (status_text, status_style) = if device.shared {
         ("Shared", Style::default().fg(Color::Green))
@@ -170,15 +179,56 @@ fn create_device_row(device: &DeviceState, _is_selected: bool) -> Row<'static> {
         Style::default().fg(Color::DarkGray)
     };
 
+    // Session time remaining (show minimum time across all sessions with limits)
+    let (time_text, time_style) = {
+        let min_time = device
+            .session_times
+            .values()
+            .filter_map(|s| s.time_remaining_secs)
+            .min();
+
+        let has_warning = device.session_times.values().any(|s| s.warning);
+
+        match min_time {
+            Some(secs) if has_warning => {
+                (format_session_time(secs), Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+            }
+            Some(secs) if secs < 300 => {
+                (format_session_time(secs), Style::default().fg(Color::Yellow))
+            }
+            Some(secs) => {
+                (format_session_time(secs), Style::default().fg(Color::DarkGray))
+            }
+            None => ("-".to_string(), Style::default().fg(Color::DarkGray)),
+        }
+    };
+
     let cells = vec![
         Cell::from(format!("{}", info.id.0)),
         Cell::from(format!("{:04x}:{:04x}", info.vendor_id, info.product_id)),
         Cell::from(name),
+        Cell::from(mode_char).style(mode_style),
         Cell::from(status_text).style(status_style),
         Cell::from(format!("{}", client_count)).style(client_style),
+        Cell::from(time_text).style(time_style),
     ];
 
     Row::new(cells)
+}
+
+/// Format session time remaining for display
+fn format_session_time(secs: u64) -> String {
+    if secs >= 3600 {
+        let hours = secs / 3600;
+        let mins = (secs % 3600) / 60;
+        format!("{}h{}m", hours, mins)
+    } else if secs >= 60 {
+        let mins = secs / 60;
+        let secs_rem = secs % 60;
+        format!("{}m{}s", mins, secs_rem)
+    } else {
+        format!("{}s", secs)
+    }
 }
 
 /// Render the metrics panel
@@ -553,6 +603,26 @@ fn render_help_dialog(frame: &mut Frame) {
             Span::styled("  Private      ", Style::default().fg(Color::Red)),
             Span::raw("Device not shared"),
         ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Sharing Modes",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  E            ", Style::default().fg(Color::Red)),
+            Span::raw("Exclusive - One client at a time"),
+        ]),
+        Line::from(vec![
+            Span::styled("  S            ", Style::default().fg(Color::Cyan)),
+            Span::raw("Shared - Multiple clients allowed"),
+        ]),
+        Line::from(vec![
+            Span::styled("  R            ", Style::default().fg(Color::Yellow)),
+            Span::raw("Read-Only - Read shared, write exclusive"),
+        ]),
     ];
 
     let help_paragraph = Paragraph::new(help_content)
@@ -675,6 +745,20 @@ fn render_device_details_dialog(frame: &mut Frame, app: &App) {
                     Span::styled("Shared", Style::default().fg(Color::Green))
                 } else {
                     Span::styled("Private", Style::default().fg(Color::Red))
+                },
+            ]),
+            Line::from(vec![
+                Span::styled("Sharing Mode:    ", Style::default().fg(Color::DarkGray)),
+                match device.sharing_mode {
+                    SharingMode::Exclusive => {
+                        Span::styled("Exclusive (E)", Style::default().fg(Color::Red))
+                    }
+                    SharingMode::Shared => {
+                        Span::styled("Shared (S)", Style::default().fg(Color::Cyan))
+                    }
+                    SharingMode::ReadOnly => {
+                        Span::styled("Read-Only (R)", Style::default().fg(Color::Yellow))
+                    }
                 },
             ]),
             Line::from(vec![

@@ -29,6 +29,10 @@ pub struct ServerConfig {
     /// Device sharing configuration
     #[serde(default)]
     pub sharing: SharingSettings,
+    /// Timezone offset in hours from UTC for time window calculations
+    /// (e.g., +2 for CEST, -5 for EST)
+    #[serde(default)]
+    pub timezone_offset_hours: i32,
 }
 
 /// Audit logging configuration
@@ -452,6 +456,7 @@ impl Default for ServerConfig {
             bandwidth: BandwidthSettings::default(),
             qos: QosSettings::default(),
             sharing: SharingSettings::default(),
+            timezone_offset_hours: 0,
         }
     }
 }

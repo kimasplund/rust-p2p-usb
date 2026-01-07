@@ -11,12 +11,13 @@ use common::{
 use iroh::{Endpoint, PublicKey as EndpointId};
 use std::collections::HashSet;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, error, info, warn};
 
 use super::connection::ClientConnection;
 use crate::audit::SharedAuditLogger;
 use crate::config::ServerConfig;
+use crate::policy::{PolicyEngine, SessionExpiredEvent};
 
 /// Iroh P2P server for USB device sharing
 ///
@@ -35,6 +36,11 @@ pub struct IrohServer {
     audit_logger: SharedAuditLogger,
     /// Rate limiter for bandwidth control (optional, shared across all connections)
     rate_limiter: Option<SharedRateLimiter>,
+    /// Policy engine for time-based access control and passthrough policies
+    policy_engine: Arc<PolicyEngine>,
+    /// Channel receiver for session expiration events (for future server-level handling)
+    #[allow(dead_code)]
+    session_expired_rx: mpsc::UnboundedReceiver<SessionExpiredEvent>,
 }
 
 impl IrohServer {
@@ -114,6 +120,24 @@ impl IrohServer {
             None
         };
 
+        // Create policy engine for time-based access control
+        let (session_expired_tx, session_expired_rx) = mpsc::unbounded_channel();
+        let policy_engine = Arc::new(
+            PolicyEngine::new(config.device_policies.clone())
+                .with_timezone_offset(config.timezone_offset_hours)
+                .with_expiration_channel(session_expired_tx),
+        );
+
+        // Spawn expiration monitor task
+        let _monitor_handle = policy_engine.clone().spawn_expiration_monitor();
+
+        if !config.device_policies.is_empty() {
+            info!(
+                "Policy engine enabled with {} device policies",
+                config.device_policies.len()
+            );
+        }
+
         Ok(Self {
             endpoint,
             usb_bridge,
@@ -121,6 +145,8 @@ impl IrohServer {
             config,
             audit_logger,
             rate_limiter,
+            policy_engine,
+            session_expired_rx,
         })
     }
 
@@ -159,6 +185,7 @@ impl IrohServer {
             let require_approval = self.config.security.require_approval;
             let audit_logger = self.audit_logger.clone();
             let rate_limiter = self.rate_limiter.clone();
+            let policy_engine = self.policy_engine.clone();
 
             tokio::spawn(async move {
                 if let Err(e) = Self::handle_connection(
@@ -168,6 +195,7 @@ impl IrohServer {
                     require_approval,
                     audit_logger,
                     rate_limiter,
+                    policy_engine,
                 )
                 .await
                 {
@@ -189,6 +217,7 @@ impl IrohServer {
         require_approval: bool,
         audit_logger: SharedAuditLogger,
         rate_limiter: Option<SharedRateLimiter>,
+        policy_engine: Arc<PolicyEngine>,
     ) -> Result<()> {
         // Wait for connection to establish
         let connection = incoming.await.context("Failed to establish connection")?;
@@ -231,6 +260,7 @@ impl IrohServer {
             usb_bridge,
             audit_logger.clone(),
             rate_limiter,
+            policy_engine,
         );
 
         client_conn.run().await?;

@@ -279,6 +279,31 @@ pub enum UsbError {
     Other { message: String },
 }
 
+impl From<AttachError> for UsbError {
+    fn from(err: AttachError) -> Self {
+        match err {
+            AttachError::DeviceNotFound => UsbError::NotFound,
+            AttachError::AlreadyAttached => UsbError::Busy,
+            AttachError::PermissionDenied => UsbError::Access,
+            AttachError::PolicyDenied { reason } => UsbError::Other { message: reason },
+            AttachError::OutsideTimeWindow {
+                current_time,
+                allowed_windows,
+            } => UsbError::Other {
+                message: format!(
+                    "Outside allowed time window ({}, allowed: {})",
+                    current_time,
+                    allowed_windows.join(", ")
+                ),
+            },
+            AttachError::DeviceClassRestricted { device_class } => UsbError::Other {
+                message: format!("Device class {:02x} restricted", device_class),
+            },
+            AttachError::Other { message } => UsbError::Other { message },
+        }
+    }
+}
+
 /// Device attach error
 ///
 /// Returned when a client attempts to attach to a device.

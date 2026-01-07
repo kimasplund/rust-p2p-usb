@@ -10,7 +10,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use iroh::PublicKey as EndpointId;
-use protocol::DeviceInfo;
+use protocol::{DeviceInfo, SharingMode};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Stdout};
@@ -22,6 +22,15 @@ use tracing::{debug, error, info, warn};
 use super::events::{Action, Event, EventHandler};
 use super::ui;
 
+/// Session time info for policy-limited sessions
+#[derive(Debug, Clone)]
+pub struct SessionTimeInfo {
+    /// Time remaining in seconds (None if unlimited)
+    pub time_remaining_secs: Option<u64>,
+    /// Whether a warning should be shown (approaching limit)
+    pub warning: bool,
+}
+
 /// Device sharing state
 #[derive(Debug, Clone)]
 pub struct DeviceState {
@@ -31,6 +40,10 @@ pub struct DeviceState {
     pub shared: bool,
     /// Connected client EndpointIds using this device
     pub clients: HashSet<String>,
+    /// Sharing mode for this device
+    pub sharing_mode: SharingMode,
+    /// Session time info for clients with time limits (client_id -> time_info)
+    pub session_times: HashMap<String, SessionTimeInfo>,
 }
 
 /// Current dialog/popup being displayed
@@ -104,6 +117,13 @@ pub enum NetworkEvent {
         bytes_received: u64,
         success: bool,
         latency_us: u64,
+    },
+    /// Session time update for policy-limited devices
+    SessionTimeUpdate {
+        device_id: u32,
+        endpoint_id: String,
+        time_remaining_secs: Option<u64>,
+        warning: bool,
     },
 }
 
@@ -377,12 +397,16 @@ impl App {
                     info,
                     shared: existing.shared,
                     clients: existing.clients.clone(),
+                    sharing_mode: existing.sharing_mode,
+                    session_times: existing.session_times.clone(),
                 }
             } else {
                 DeviceState {
                     info,
                     shared: self.auto_share,
                     clients: HashSet::new(),
+                    sharing_mode: SharingMode::Exclusive,
+                    session_times: HashMap::new(),
                 }
             };
             new_devices.insert(id, state);
@@ -417,6 +441,8 @@ impl App {
                         info: device,
                         shared: self.auto_share,
                         clients: HashSet::new(),
+                        sharing_mode: SharingMode::Exclusive,
+                        session_times: HashMap::new(),
                     },
                 );
                 if !self.device_order.contains(&id) {
@@ -505,6 +531,38 @@ impl App {
                 // Record to device metrics
                 let device_metrics = self.get_or_create_device_metrics(device_id);
                 device_metrics.record_transfer(bytes_sent, bytes_received, latency, success);
+            }
+            NetworkEvent::SessionTimeUpdate {
+                device_id,
+                endpoint_id,
+                time_remaining_secs,
+                warning,
+            } => {
+                // Update session time info for the device
+                if let Some(device) = self.devices.get_mut(&device_id) {
+                    device.session_times.insert(
+                        endpoint_id.clone(),
+                        SessionTimeInfo {
+                            time_remaining_secs,
+                            warning,
+                        },
+                    );
+                }
+
+                // Log session time warnings for policy-limited devices
+                if warning {
+                    if let Some(remaining) = time_remaining_secs {
+                        warn!(
+                            "Session time warning for client {} on device {}: {}s remaining",
+                            endpoint_id, device_id, remaining
+                        );
+                    }
+                } else {
+                    debug!(
+                        "Session time update for client {} on device {}: {:?}s remaining",
+                        endpoint_id, device_id, time_remaining_secs
+                    );
+                }
             }
         }
     }
@@ -690,10 +748,14 @@ mod tests {
             info,
             shared: false,
             clients: HashSet::new(),
+            sharing_mode: SharingMode::Exclusive,
+            session_times: HashMap::new(),
         };
 
         assert!(!state.shared);
         assert!(state.clients.is_empty());
+        assert_eq!(state.sharing_mode, SharingMode::Exclusive);
+        assert!(state.session_times.is_empty());
     }
 
     #[test]

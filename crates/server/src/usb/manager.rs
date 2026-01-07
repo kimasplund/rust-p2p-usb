@@ -4,8 +4,12 @@
 //! This module runs in the USB thread and manages the device registry.
 
 use crate::usb::device::UsbDevice;
+use crate::usb::sharing::{DeviceAccessTracker, SharingEvent};
 use common::UsbEvent;
-use protocol::{AttachError, DetachError, DeviceHandle, DeviceId, DeviceInfo};
+use protocol::{
+    AttachError, DetachError, DeviceHandle, DeviceId, DeviceInfo, DeviceSharingStatus, LockResult,
+    SharingMode, UnlockResult,
+};
 use rusb::{Context, Device, Hotplug, HotplugBuilder, Registration, UsbContext};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -40,6 +44,27 @@ pub struct DebouncedEvent {
 /// Shared debounce state between HotplugCallback and DeviceManager
 pub type DebounceState = Arc<std::sync::Mutex<HashMap<(u8, u8), DebouncedEvent>>>;
 
+/// Sharing configuration for DeviceManager
+#[derive(Debug, Clone)]
+pub struct SharingConfig {
+    /// Default sharing mode for devices without a specific policy
+    pub default_mode: SharingMode,
+    /// Default lock timeout in seconds
+    pub default_lock_timeout_secs: u32,
+    /// Default max concurrent clients
+    pub default_max_clients: u32,
+}
+
+impl Default for SharingConfig {
+    fn default() -> Self {
+        Self {
+            default_mode: SharingMode::Exclusive,
+            default_lock_timeout_secs: 300, // 5 minutes
+            default_max_clients: 4,
+        }
+    }
+}
+
 /// USB device manager
 ///
 /// Manages the registry of discovered USB devices, handles hot-plug events,
@@ -65,6 +90,10 @@ pub struct DeviceManager {
     allowed_filters: Vec<String>,
     /// Shared debounce state for hotplug events
     debounce_state: DebounceState,
+    /// Device access tracker for multi-client sharing
+    access_tracker: DeviceAccessTracker,
+    /// Sharing configuration
+    sharing_config: SharingConfig,
 }
 
 impl DeviceManager {
@@ -72,6 +101,15 @@ impl DeviceManager {
     pub fn new(
         event_sender: async_channel::Sender<UsbEvent>,
         allowed_filters: Vec<String>,
+    ) -> Result<Self, rusb::Error> {
+        Self::with_sharing_config(event_sender, allowed_filters, SharingConfig::default())
+    }
+
+    /// Create a new device manager with sharing configuration
+    pub fn with_sharing_config(
+        event_sender: async_channel::Sender<UsbEvent>,
+        allowed_filters: Vec<String>,
+        sharing_config: SharingConfig,
     ) -> Result<Self, rusb::Error> {
         let context = Context::new()?;
 
@@ -86,6 +124,8 @@ impl DeviceManager {
             event_sender,
             allowed_filters,
             debounce_state: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            access_tracker: DeviceAccessTracker::new(),
+            sharing_config,
         })
     }
 
@@ -199,6 +239,14 @@ impl DeviceManager {
         self.device_ids.insert(device_id, key);
         self.devices.insert(key, usb_device);
 
+        // Register device with access tracker using default sharing config
+        self.access_tracker.register_device(
+            device_id,
+            self.sharing_config.default_mode,
+            self.sharing_config.default_max_clients,
+            Duration::from_secs(self.sharing_config.default_lock_timeout_secs as u64),
+        );
+
         Ok(device_id)
     }
 
@@ -231,6 +279,9 @@ impl DeviceManager {
                     true // Keep this entry
                 }
             });
+
+            // Unregister from access tracker
+            self.access_tracker.unregister_device(device_id);
 
             debug!(
                 "Removed device {:?}: bus={}, addr={}, invalidated {} handles for {} clients",
@@ -368,9 +419,34 @@ impl DeviceManager {
         device_id: DeviceId,
         client_id: String,
     ) -> Result<DeviceHandle, AttachError> {
-        // Check if already attached (before borrowing device)
-        if self.attached.values().any(|(id, _)| *id == device_id) {
-            return Err(AttachError::AlreadyAttached);
+        // Check if device exists first
+        if !self.device_ids.contains_key(&device_id) {
+            return Err(AttachError::DeviceNotFound);
+        }
+
+        // Check sharing policy via access tracker
+        if !self.access_tracker.can_attach(device_id) {
+            // Get the sharing mode to provide a better error message
+            let mode = self.access_tracker.get_mode(device_id);
+            return Err(AttachError::PolicyDenied {
+                reason: match mode {
+                    Some(SharingMode::Exclusive) => {
+                        "Device is in exclusive mode and already attached".to_string()
+                    }
+                    Some(SharingMode::Shared) | Some(SharingMode::ReadOnly) => {
+                        "Maximum concurrent clients reached".to_string()
+                    }
+                    None => "Device not available for sharing".to_string(),
+                },
+            });
+        }
+
+        // Legacy check: For Exclusive mode, also check our old attached map
+        // (This is a fallback - access_tracker.can_attach should handle this)
+        if self.sharing_config.default_mode == SharingMode::Exclusive {
+            if self.attached.values().any(|(id, _)| *id == device_id) {
+                return Err(AttachError::AlreadyAttached);
+            }
         }
 
         // Check if device exists and open it
@@ -385,6 +461,11 @@ impl DeviceManager {
         let handle = DeviceHandle(self.next_handle_id);
         self.next_handle_id += 1;
 
+        // Register attachment with access tracker
+        if let Some(state) = self.access_tracker.get_state_mut(device_id) {
+            state.attach_client(client_id.clone(), handle);
+        }
+
         self.attached.insert(handle, (device_id, client_id.clone()));
 
         info!(
@@ -396,15 +477,25 @@ impl DeviceManager {
     }
 
     /// Detach a device
+    ///
+    /// Returns the device_id that was detached (for queue processing)
     pub fn detach_device(&mut self, handle: DeviceHandle) -> Result<(), DetachError> {
         let (device_id, client_id) = self
             .attached
             .remove(&handle)
             .ok_or(DetachError::HandleNotFound)?;
 
-        // Close the device
-        if let Some(device) = self.get_device_by_id_mut(device_id) {
-            device.close();
+        // Detach from access tracker
+        if let Some(state) = self.access_tracker.get_state_mut(device_id) {
+            state.detach_client(handle);
+        }
+
+        // Close the device only if no other clients are attached
+        let other_clients = self.attached.values().any(|(id, _)| *id == device_id);
+        if !other_clients {
+            if let Some(device) = self.get_device_by_id_mut(device_id) {
+                device.close();
+            }
         }
 
         info!(
@@ -413,6 +504,35 @@ impl DeviceManager {
         );
 
         Ok(())
+    }
+
+    /// Process the queue for a device after detachment
+    ///
+    /// Should be called after detach_device to grant access to waiting clients.
+    /// Returns sharing events to send to clients.
+    pub fn process_device_queue(&mut self, device_id: DeviceId) -> Vec<SharingEvent> {
+        let mut events = Vec::new();
+
+        if let Some(state) = self.access_tracker.get_state_mut(device_id) {
+            // Process the queue
+            if let Some(granted_handle) = state.process_queue() {
+                events.push(SharingEvent::AccessGranted {
+                    device_id,
+                    handle: granted_handle,
+                });
+
+                // Update queue positions for remaining clients
+                for (handle, position) in state.get_all_queue_positions() {
+                    events.push(SharingEvent::QueuePositionChanged {
+                        device_id,
+                        handle,
+                        new_position: position,
+                    });
+                }
+            }
+        }
+
+        events
     }
 
     /// Get device by DeviceId
@@ -494,6 +614,111 @@ impl DeviceManager {
         }
 
         false
+    }
+
+    /// Get sharing status for a device
+    pub fn get_sharing_status(
+        &self,
+        device_id: DeviceId,
+        handle: Option<DeviceHandle>,
+    ) -> Result<DeviceSharingStatus, AttachError> {
+        // Check if device exists
+        if !self.device_ids.contains_key(&device_id) {
+            return Err(AttachError::DeviceNotFound);
+        }
+
+        // Get status from access tracker
+        if let Some(state) = self.access_tracker.get_state(device_id) {
+            Ok(state.get_status(handle))
+        } else {
+            // Device exists but not registered with tracker - return default status
+            Ok(DeviceSharingStatus {
+                device_id,
+                sharing_mode: self.sharing_config.default_mode,
+                attached_clients: 0,
+                has_write_lock: false,
+                queue_position: 0,
+                queue_length: 0,
+            })
+        }
+    }
+
+    /// Acquire a lock on a device
+    pub fn acquire_lock(&mut self, handle: DeviceHandle, write_access: bool) -> LockResult {
+        // Find the device for this handle
+        let device_id = match self.access_tracker.get_device_for_handle(handle) {
+            Some(id) => id,
+            None => {
+                // Try to get device_id from attached map
+                match self.attached.get(&handle) {
+                    Some((id, _)) => *id,
+                    None => {
+                        return LockResult::NotAvailable {
+                            reason: "Handle not found".to_string(),
+                        };
+                    }
+                }
+            }
+        };
+
+        // Acquire lock via access tracker
+        if let Some(state) = self.access_tracker.get_state_mut(device_id) {
+            state.acquire_lock(handle, write_access)
+        } else {
+            LockResult::NotAvailable {
+                reason: "Device not registered for sharing".to_string(),
+            }
+        }
+    }
+
+    /// Release a lock on a device
+    pub fn release_lock(&mut self, handle: DeviceHandle) -> UnlockResult {
+        // Find the device for this handle
+        let device_id = match self.access_tracker.get_device_for_handle(handle) {
+            Some(id) => id,
+            None => {
+                // Try to get device_id from attached map
+                match self.attached.get(&handle) {
+                    Some((id, _)) => *id,
+                    None => {
+                        return UnlockResult::Error {
+                            message: "Handle not found".to_string(),
+                        };
+                    }
+                }
+            }
+        };
+
+        // Release lock via access tracker
+        if let Some(state) = self.access_tracker.get_state_mut(device_id) {
+            state.release_lock(handle)
+        } else {
+            UnlockResult::Error {
+                message: "Device not registered for sharing".to_string(),
+            }
+        }
+    }
+
+    /// Process all device queues and check for lock timeouts
+    ///
+    /// Returns sharing events to send to clients.
+    pub fn process_all_queues(&mut self) -> Vec<SharingEvent> {
+        self.access_tracker.process_all()
+    }
+
+    /// Get the device ID for a handle
+    pub fn get_device_id_for_handle(&self, handle: DeviceHandle) -> Option<DeviceId> {
+        self.attached.get(&handle).map(|(id, _)| *id)
+    }
+
+    /// Get client ID for a handle
+    pub fn get_client_id_for_handle(&self, handle: DeviceHandle) -> Option<String> {
+        self.attached.get(&handle).map(|(_, client)| client.clone())
+    }
+
+    /// Get the sharing mode for a device
+    pub fn get_sharing_mode(&self, device_id: DeviceId) -> Option<SharingMode> {
+        self.access_tracker.get_mode(device_id)
     }
 }
 

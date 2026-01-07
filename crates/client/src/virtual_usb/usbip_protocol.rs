@@ -220,20 +220,14 @@ impl UsbIpCmdSubmit {
 
         // NO padding - kernel struct is __packed (28 bytes total)
 
-        /*
         // Read ISO descriptors if number_of_packets > 0
+        // We must read them to keep the stream in sync, even if we don't support ISO transfers yet
         let mut iso_packets = Vec::new();
         if number_of_packets > 0 {
             for _ in 0..number_of_packets {
                 iso_packets.push(UsbIpIsoPacketDescriptor::read_from(reader)?);
             }
         }
-        */
-
-        // Create empty vector for now to satisfy struct initialization
-        // This is a temporary workaround until ISO support is fully implemented
-        #[allow(unused_mut)]
-        let mut iso_packets: Vec<UsbIpIsoPacketDescriptor> = Vec::new();
 
         Ok(Self {
             transfer_flags,

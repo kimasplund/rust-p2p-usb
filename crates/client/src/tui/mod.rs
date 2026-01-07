@@ -41,7 +41,7 @@ use tracing::{error, info, warn};
 use crate::config::ClientConfig;
 use crate::network::ConnectionState;
 use crate::network::IrohClient;
-use crate::virtual_usb::VirtualUsbManager;
+use crate::virtual_usb::{GlobalDeviceId, VirtualUsbManager};
 
 pub use app::{App, AppAction, DeviceStatus, ServerStatus};
 pub use events::EventHandler;
@@ -451,7 +451,9 @@ impl TuiRunner {
 
             // Attach as virtual USB
             match virtual_usb.attach_device(device_proxy).await {
-                Ok(handle) => {
+                Ok(global_id) => {
+                    // Extract DeviceHandle from GlobalDeviceId for TUI tracking
+                    let handle = global_id.device_handle;
                     let _ = tx
                         .send(TuiMessage::DeviceAttached(endpoint_id, device_id, handle))
                         .await;
@@ -475,7 +477,9 @@ impl TuiRunner {
         let tx = self.message_tx.clone();
 
         tokio::spawn(async move {
-            match virtual_usb.detach_device(handle).await {
+            // Construct GlobalDeviceId from endpoint_id and handle
+            let global_id = GlobalDeviceId::new(endpoint_id, handle);
+            match virtual_usb.detach_device(global_id).await {
                 Ok(()) => {
                     let _ = tx
                         .send(TuiMessage::DeviceDetached(endpoint_id, handle))
@@ -566,9 +570,9 @@ pub async fn run(
     // Cleanup: detach all virtual USB devices
     info!("Cleaning up virtual USB devices...");
     let attached_devices = virtual_usb.list_devices().await;
-    for device_handle in attached_devices {
-        if let Err(e) = virtual_usb.detach_device(device_handle).await {
-            warn!("Failed to detach device {}: {}", device_handle.0, e);
+    for global_id in attached_devices {
+        if let Err(e) = virtual_usb.detach_device(global_id).await {
+            warn!("Failed to detach device {}: {}", global_id, e);
         }
     }
 

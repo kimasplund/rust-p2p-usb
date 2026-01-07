@@ -32,25 +32,30 @@
 //! - Requires appropriate permissions (root or udev rules)
 
 use anyhow::{Context, Result, anyhow};
+use iroh::PublicKey as EndpointId;
 use protocol::{DeviceHandle, DeviceSpeed};
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use super::device::VirtualDevice;
 use super::socket_bridge::SocketBridge;
+use super::GlobalDeviceId;
 use crate::network::device_proxy::DeviceProxy;
 
 /// Linux-specific virtual USB manager using USB/IP
+///
+/// Supports multiple servers simultaneously by using GlobalDeviceId
+/// (server_id + device_handle) as the unique key for devices.
 pub struct LinuxVirtualUsbManager {
-    /// Attached virtual devices
-    attached_devices: Arc<RwLock<HashMap<DeviceHandle, VirtualDevice>>>,
-    /// Socket bridges for USB/IP protocol
-    socket_bridges: Arc<RwLock<HashMap<DeviceHandle, Arc<SocketBridge>>>>,
+    /// Attached virtual devices, keyed by GlobalDeviceId for multi-server support
+    attached_devices: Arc<RwLock<HashMap<GlobalDeviceId, VirtualDevice>>>,
+    /// Socket bridges for USB/IP protocol, keyed by GlobalDeviceId
+    socket_bridges: Arc<RwLock<HashMap<GlobalDeviceId, Arc<SocketBridge>>>>,
     /// VHCI device path (e.g., /sys/devices/platform/vhci_hcd.0)
     vhci_path: PathBuf,
     /// Bitmap for high-speed ports (0-7 for USB 2.0 and below)
@@ -75,13 +80,78 @@ impl LinuxVirtualUsbManager {
 
         info!("Found vhci_hcd at: {}", vhci_path.display());
 
+        // Read current kernel port status to initialize bitmaps correctly
+        // This handles the case where multiple client processes share the VHCI
+        let (hs_bitmap, ss_bitmap) = Self::read_kernel_port_status(&vhci_path)?;
+
+        debug!(
+            "Initialized port bitmaps from kernel: hs={:08b}, ss={:08b}",
+            hs_bitmap, ss_bitmap
+        );
+
         Ok(Self {
             attached_devices: Arc::new(RwLock::new(HashMap::new())),
             socket_bridges: Arc::new(RwLock::new(HashMap::new())),
             vhci_path,
-            hs_ports: Arc::new(RwLock::new(0)), // All high-speed ports free (bitmap)
-            ss_ports: Arc::new(RwLock::new(0)), // All super-speed ports free (bitmap)
+            hs_ports: Arc::new(RwLock::new(hs_bitmap)),
+            ss_ports: Arc::new(RwLock::new(ss_bitmap)),
         })
+    }
+
+    /// Read the kernel VHCI status file to determine which ports are in use
+    ///
+    /// Returns (hs_bitmap, ss_bitmap) where 1 = in use, 0 = free
+    fn read_kernel_port_status(vhci_path: &Path) -> Result<(u8, u8)> {
+        let status_path = vhci_path.join("status");
+        let content = std::fs::read_to_string(&status_path)
+            .context("Failed to read VHCI status file")?;
+
+        let mut hs_bitmap: u8 = 0;
+        let mut ss_bitmap: u8 = 0;
+
+        // Parse status file format:
+        // hub port sta spd dev      sockfd local_busid
+        // hs  0000 004 000 00000000 000000 0-0
+        // ss  0008 004 000 00000000 000000 0-0
+        //
+        // sta=004 means VDEV_ST_NULL (available)
+        // sta=006 means VDEV_ST_USED (in use)
+        for line in content.lines().skip(1) {
+            // Skip header
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 3 {
+                continue;
+            }
+
+            let hub_type = parts[0]; // "hs" or "ss"
+            let port_str = parts[1]; // "0000", "0001", etc.
+            let status_str = parts[2]; // "004" = free, "006" = in use
+
+            // Parse port number
+            let port: u8 = match port_str.parse() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            // Parse status - anything other than 004 means in use
+            let status: u16 = status_str.parse().unwrap_or(0);
+            let in_use = status != 4; // VDEV_ST_NULL = 4
+
+            if in_use {
+                match hub_type {
+                    "hs" if port < 8 => {
+                        hs_bitmap |= 1 << port;
+                    }
+                    "ss" if port >= 8 && port < 16 => {
+                        // ss ports are stored as bit offset from 8
+                        ss_bitmap |= 1 << (port - 8);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok((hs_bitmap, ss_bitmap))
     }
 
     /// Find the vhci_hcd device path
@@ -106,15 +176,20 @@ impl LinuxVirtualUsbManager {
     }
 
     /// Attach a device to the virtual USB controller
-    pub async fn attach_device(&self, device_proxy: Arc<DeviceProxy>) -> Result<DeviceHandle> {
+    ///
+    /// Returns a GlobalDeviceId that uniquely identifies the device across all servers.
+    pub async fn attach_device(&self, device_proxy: Arc<DeviceProxy>) -> Result<GlobalDeviceId> {
         let device_info = device_proxy.device_info();
+        let server_id = device_proxy.server_id();
         let handle = DeviceHandle(device_info.id.0);
+        let global_id = GlobalDeviceId::new(server_id, handle);
 
         debug!(
-            "Attaching virtual device: {} (VID: {:04x}, PID: {:04x})",
+            "Attaching virtual device: {} (VID: {:04x}, PID: {:04x}) from server {}",
             device_proxy.description(),
             device_info.vendor_id,
-            device_info.product_id
+            device_info.product_id,
+            &server_id.to_string()[..8]
         );
 
         // Ensure device proxy is attached to remote
@@ -162,44 +237,44 @@ impl LinuxVirtualUsbManager {
         let virtual_device =
             VirtualDevice::new(handle, device_proxy.clone(), device_info.clone(), port);
 
-        // Store device and bridge
+        // Store device and bridge using GlobalDeviceId as key
         self.attached_devices
             .write()
             .await
-            .insert(handle, virtual_device);
+            .insert(global_id, virtual_device);
 
         self.socket_bridges
             .write()
             .await
-            .insert(handle, socket_bridge);
+            .insert(global_id, socket_bridge);
 
         info!(
-            "Virtual device attached successfully: handle={}, port={}",
-            handle.0, port
+            "Virtual device attached successfully: {} port={}",
+            global_id, port
         );
 
-        Ok(handle)
+        Ok(global_id)
     }
 
     /// Detach a virtual USB device
-    pub async fn detach_device(&self, handle: DeviceHandle) -> Result<()> {
+    pub async fn detach_device(&self, global_id: GlobalDeviceId) -> Result<()> {
         let mut devices = self.attached_devices.write().await;
 
         let device = devices
-            .get(&handle)
-            .ok_or_else(|| anyhow!("Device handle {} not found", handle.0))?;
+            .get(&global_id)
+            .ok_or_else(|| anyhow!("Device {} not found", global_id))?;
 
         let port = device.vhci_port();
         let device_proxy = device.device_proxy().clone();
 
         debug!(
-            "Detaching virtual device: handle={}, port={}",
-            handle.0, port
+            "Detaching virtual device: {}, port={}",
+            global_id, port
         );
 
         // Stop the socket bridge first
         let mut bridges = self.socket_bridges.write().await;
-        if let Some(bridge) = bridges.remove(&handle) {
+        if let Some(bridge) = bridges.remove(&global_id) {
             bridge.stop();
         }
         drop(bridges);
@@ -213,7 +288,7 @@ impl LinuxVirtualUsbManager {
         self.free_port(port).await;
 
         // Remove from map (now safe - no more references to device)
-        devices.remove(&handle);
+        devices.remove(&global_id);
 
         // Detach from remote device
         let device_proxy = &device_proxy;
@@ -224,38 +299,76 @@ impl LinuxVirtualUsbManager {
                 .context("Failed to detach from remote device")?;
         }
 
-        info!("Virtual device detached successfully: handle={}", handle.0);
+        info!("Virtual device detached successfully: {}", global_id);
 
         Ok(())
     }
 
     /// List all attached virtual devices
-    pub async fn list_devices(&self) -> Vec<DeviceHandle> {
+    pub async fn list_devices(&self) -> Vec<GlobalDeviceId> {
         self.attached_devices.read().await.keys().copied().collect()
     }
 
-    /// Get the device IDs of all locally attached virtual devices
+    /// Get the device IDs of all locally attached virtual devices for a specific server
     ///
-    /// Returns a set of DeviceIds for devices currently attached via USB/IP.
+    /// Returns a set of DeviceIds for devices currently attached via USB/IP from the given server.
     /// Used for reconciliation after reconnection to compare with server state.
-    pub async fn get_attached_device_ids(&self) -> HashSet<protocol::DeviceId> {
-        let devices = self.attached_devices.read().await;
-        devices
-            .values()
-            .map(|device| device.descriptor().id)
-            .collect()
-    }
-
-    /// Get detailed information about all attached virtual devices
-    ///
-    /// Returns a vector of (DeviceHandle, DeviceId) pairs for all attached devices.
-    /// Used for reconciliation to identify which devices to detach.
-    pub async fn get_attached_device_info(&self) -> Vec<(DeviceHandle, protocol::DeviceId)> {
+    pub async fn get_attached_device_ids(&self, server_id: EndpointId) -> HashSet<protocol::DeviceId> {
         let devices = self.attached_devices.read().await;
         devices
             .iter()
-            .map(|(handle, device)| (*handle, device.descriptor().id))
+            .filter(|(gid, _)| gid.server_id == server_id)
+            .map(|(_, device)| device.descriptor().id)
             .collect()
+    }
+
+    /// Get detailed information about all attached virtual devices for a specific server
+    ///
+    /// Returns a vector of (GlobalDeviceId, DeviceId) pairs for all attached devices from the server.
+    /// Used for reconciliation to identify which devices to detach.
+    pub async fn get_attached_device_info(&self, server_id: EndpointId) -> Vec<(GlobalDeviceId, protocol::DeviceId)> {
+        let devices = self.attached_devices.read().await;
+        devices
+            .iter()
+            .filter(|(gid, _)| gid.server_id == server_id)
+            .map(|(gid, device)| (*gid, device.descriptor().id))
+            .collect()
+    }
+
+    /// Detach all devices from a specific server
+    ///
+    /// Used when a server connection is lost or intentionally closed.
+    /// Returns the list of GlobalDeviceIds that were successfully detached.
+    pub async fn detach_all_from_server(&self, server_id: EndpointId) -> Result<Vec<GlobalDeviceId>> {
+        // Get all devices from this server
+        let devices_to_detach: Vec<GlobalDeviceId> = {
+            let devices = self.attached_devices.read().await;
+            devices
+                .keys()
+                .filter(|gid| gid.server_id == server_id)
+                .copied()
+                .collect()
+        };
+
+        info!(
+            "Detaching {} devices from server {}",
+            devices_to_detach.len(),
+            &server_id.to_string()[..8]
+        );
+
+        let mut detached = Vec::new();
+        for global_id in devices_to_detach {
+            match self.force_detach(global_id).await {
+                Ok(()) => {
+                    detached.push(global_id);
+                }
+                Err(e) => {
+                    warn!("Failed to detach device {}: {}", global_id, e);
+                }
+            }
+        }
+
+        Ok(detached)
     }
 
     /// Allocate a VHCI port based on device speed
@@ -264,12 +377,24 @@ impl LinuxVirtualUsbManager {
     /// - Ports 0-7: High-speed (hs) for USB 2.0 and below (Low, Full, High)
     /// - Ports 8-15: Super-speed (ss) for USB 3.0+ (Super, SuperPlus)
     ///
-    /// Uses bitmap-based allocation to find the first free port and mark it as allocated.
+    /// Re-reads kernel status before allocation to handle multiple processes
+    /// sharing the same VHCI. Uses bitmap-based allocation to find the first
+    /// free port and mark it as allocated.
     async fn allocate_port(&self, speed: DeviceSpeed) -> Result<u8> {
+        // Re-read kernel status to get accurate port state
+        // This handles multiple client processes sharing the VHCI
+        // If reading fails (e.g., in tests or if VHCI isn't accessible),
+        // fall back to using local bitmap only
+        let (kernel_hs, kernel_ss) = Self::read_kernel_port_status(&self.vhci_path)
+            .unwrap_or((0, 0));
+
         match speed {
             // USB 2.0 and below: use high-speed ports (0-7)
             DeviceSpeed::Low | DeviceSpeed::Full | DeviceSpeed::High => {
                 let mut bitmap = self.hs_ports.write().await;
+
+                // Merge kernel state with our local state (take union of in-use ports)
+                *bitmap |= kernel_hs;
 
                 // Find first free bit (0) using trailing_ones
                 // trailing_ones returns the count of consecutive 1s from bit 0
@@ -286,8 +411,8 @@ impl LinuxVirtualUsbManager {
                 *bitmap |= 1 << free_bit;
 
                 debug!(
-                    "Allocated high-speed port {} (bitmap: {:08b})",
-                    free_bit, *bitmap
+                    "Allocated high-speed port {} (bitmap: {:08b}, kernel: {:08b})",
+                    free_bit, *bitmap, kernel_hs
                 );
 
                 Ok(free_bit)
@@ -295,6 +420,9 @@ impl LinuxVirtualUsbManager {
             // USB 3.0+: use super-speed ports (8-15)
             DeviceSpeed::Super | DeviceSpeed::SuperPlus => {
                 let mut bitmap = self.ss_ports.write().await;
+
+                // Merge kernel state with our local state
+                *bitmap |= kernel_ss;
 
                 // Find first free bit (0)
                 let free_bit = (*bitmap).trailing_ones() as u8;
@@ -312,8 +440,8 @@ impl LinuxVirtualUsbManager {
                 let port = free_bit + 8;
 
                 debug!(
-                    "Allocated super-speed port {} (bitmap: {:08b})",
-                    port, *bitmap
+                    "Allocated super-speed port {} (bitmap: {:08b}, kernel: {:08b})",
+                    port, *bitmap, kernel_ss
                 );
 
                 Ok(port)
@@ -436,25 +564,28 @@ impl LinuxVirtualUsbManager {
     /// for the removed remote device.
     pub async fn handle_device_removed(
         &self,
+        server_id: EndpointId,
         device_id: protocol::DeviceId,
         invalidated_handles: Vec<protocol::DeviceHandle>,
-    ) -> Result<Vec<protocol::DeviceHandle>> {
+    ) -> Result<Vec<GlobalDeviceId>> {
         info!(
-            "Remote device {:?} removed, cleaning up {} virtual devices",
+            "Remote device {:?} from server {} removed, cleaning up {} virtual devices",
             device_id,
+            &server_id.to_string()[..8],
             invalidated_handles.len()
         );
 
         let mut detached = Vec::new();
 
         for handle in invalidated_handles {
-            match self.force_detach(handle).await {
+            let global_id = GlobalDeviceId::new(server_id, handle);
+            match self.force_detach(global_id).await {
                 Ok(()) => {
-                    info!("Successfully detached virtual device handle {}", handle.0);
-                    detached.push(handle);
+                    info!("Successfully detached virtual device {}", global_id);
+                    detached.push(global_id);
                 }
                 Err(e) => {
-                    warn!("Failed to detach device handle {}: {}", handle.0, e);
+                    warn!("Failed to detach device {}: {}", global_id, e);
                 }
             }
         }
@@ -466,14 +597,14 @@ impl LinuxVirtualUsbManager {
     ///
     /// This is more lenient than `detach_device` - it won't fail if
     /// the device is already partially detached.
-    async fn force_detach(&self, handle: protocol::DeviceHandle) -> Result<()> {
+    async fn force_detach(&self, global_id: GlobalDeviceId) -> Result<()> {
         let devices = self.attached_devices.read().await;
 
-        if let Some(device) = devices.get(&handle) {
+        if let Some(device) = devices.get(&global_id) {
             let port = device.vhci_port();
             drop(devices);
 
-            if let Some(bridge) = self.socket_bridges.write().await.remove(&handle) {
+            if let Some(bridge) = self.socket_bridges.write().await.remove(&global_id) {
                 bridge.stop();
             }
 
@@ -484,7 +615,7 @@ impl LinuxVirtualUsbManager {
             self.free_port(port).await;
         }
 
-        self.attached_devices.write().await.remove(&handle);
+        self.attached_devices.write().await.remove(&global_id);
 
         Ok(())
     }
@@ -522,12 +653,13 @@ mod tests {
     }
 
     /// Test helper: Create a minimal manager for port allocation tests
-    /// Uses a mock vhci_path since we only test port allocation logic
+    /// Uses a non-existent vhci_path so kernel status reading is skipped
     fn create_test_manager() -> LinuxVirtualUsbManager {
         LinuxVirtualUsbManager {
             attached_devices: Arc::new(RwLock::new(HashMap::new())),
             socket_bridges: Arc::new(RwLock::new(HashMap::new())),
-            vhci_path: PathBuf::from("/sys/devices/platform/vhci_hcd.0"),
+            // Use non-existent path so read_kernel_port_status fails and returns (0,0)
+            vhci_path: PathBuf::from("/nonexistent/test/vhci"),
             hs_ports: Arc::new(RwLock::new(0)),
             ss_ports: Arc::new(RwLock::new(0)),
         }

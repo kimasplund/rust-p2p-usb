@@ -215,8 +215,8 @@ async fn connect_and_run(
                         .await
                     {
                         Ok(device_proxy) => match virtual_usb.attach_device(device_proxy).await {
-                            Ok(handle) => {
-                                info!("  [ok] Attached as virtual USB device (handle: {})", handle.0);
+                            Ok(global_id) => {
+                                info!("  [ok] Attached as virtual USB device ({})", global_id);
                                 // Track this device for auto-reattach
                                 previously_attached.write().await.insert(device.id);
                             }
@@ -258,20 +258,27 @@ async fn connect_and_run(
         info!("Running in headless mode. Press Ctrl+C to shutdown.");
         signal::ctrl_c().await.context("Failed to wait for Ctrl+C")?;
         info!("Received Ctrl+C, shutting down...");
-    } else if config.client.auto_connect {
-        info!("Auto-connect enabled, launching TUI for interactive management");
-        // Run TUI - it handles cleanup internally
-        return tui::run(client, virtual_usb, config).await;
     } else {
-        info!("Connected successfully. Use TUI mode for device management.");
+        // Check if TUI mode should be launched
+        let launch_tui = config.client.global_auto_connect
+            .map(|mode| matches!(mode, config::AutoConnectMode::Auto | config::AutoConnectMode::AutoWithDevices))
+            .unwrap_or(true);
+
+        if launch_tui {
+            info!("Launching TUI for interactive management");
+            // Run TUI - it handles cleanup internally
+            return tui::run(client, virtual_usb, config).await;
+        } else {
+            info!("Connected successfully. Use TUI mode for device management.");
+        }
     }
 
     // Cleanup: detach all virtual USB devices
     info!("Detaching virtual USB devices...");
     let attached_devices = virtual_usb.list_devices().await;
-    for device_handle in attached_devices {
-        if let Err(e) = virtual_usb.detach_device(device_handle).await {
-            warn!("Failed to detach device {}: {:#}", device_handle.0, e);
+    for global_id in attached_devices {
+        if let Err(e) = virtual_usb.detach_device(global_id).await {
+            warn!("Failed to detach device {}: {:#}", global_id, e);
         }
     }
 
@@ -324,10 +331,10 @@ async fn handle_notifications(
                         .await
                     {
                         Ok(device_proxy) => match virtual_usb.attach_device(device_proxy).await {
-                            Ok(handle) => {
+                            Ok(global_id) => {
                                 info!(
-                                    "Auto-reattach successful for device {:?} (handle: {})",
-                                    device.id, handle.0
+                                    "Auto-reattach successful for device {:?} ({})",
+                                    device.id, global_id
                                 );
                             }
                             Err(e) => {
@@ -364,7 +371,7 @@ async fn handle_notifications(
                 }
 
                 if let Err(e) = virtual_usb
-                    .handle_device_removed(device_id, invalidated_handles)
+                    .handle_device_removed(server_id, device_id, invalidated_handles)
                     .await
                 {
                     warn!("Error during device cleanup: {}", e);
@@ -421,11 +428,11 @@ async fn reconcile_devices(
     // Build set of device IDs currently on server
     let server_device_ids: HashSet<DeviceId> = server_devices.iter().map(|d| d.id).collect();
 
-    // Get locally attached devices
-    let local_device_info = virtual_usb.get_attached_device_info().await;
+    // Get locally attached devices for this server
+    let local_device_info = virtual_usb.get_attached_device_info(server_id).await;
 
     debug!(
-        "Local attached devices: {}, Server devices: {}",
+        "Local attached devices for server: {}, Server devices: {}",
         local_device_info.len(),
         server_device_ids.len()
     );
@@ -433,14 +440,14 @@ async fn reconcile_devices(
     let mut result = ReconciliationResult::default();
 
     // Find devices that are locally attached but no longer on server
-    for (handle, device_id) in local_device_info {
+    for (global_id, device_id) in local_device_info {
         if !server_device_ids.contains(&device_id) {
             info!(
-                "Device {:?} (handle {}) no longer on server, detaching local virtual device",
-                device_id, handle.0
+                "Device {:?} ({}) no longer on server, detaching local virtual device",
+                device_id, global_id
             );
 
-            match virtual_usb.detach_device(handle).await {
+            match virtual_usb.detach_device(global_id).await {
                 Ok(()) => {
                     info!("Successfully detached stale device {:?}", device_id);
                     result.detached_count += 1;
@@ -452,8 +459,8 @@ async fn reconcile_devices(
             }
         } else {
             debug!(
-                "Device {:?} (handle {}) still exists on server",
-                device_id, handle.0
+                "Device {:?} ({}) still exists on server",
+                device_id, global_id
             );
         }
     }

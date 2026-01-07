@@ -40,6 +40,14 @@ pub enum UsbCommand {
         response: tokio::sync::oneshot::Sender<protocol::UsbResponse>,
     },
 
+    /// Reset a USB device
+    ResetDevice {
+        /// Device handle to reset
+        handle: protocol::DeviceHandle,
+        /// Channel to send response back
+        response: tokio::sync::oneshot::Sender<Result<(), protocol::UsbError>>,
+    },
+
     /// Shutdown the USB thread gracefully
     Shutdown,
 }

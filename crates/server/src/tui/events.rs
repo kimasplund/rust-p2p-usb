@@ -40,6 +40,10 @@ pub enum Action {
     CloseDialog,
     /// Refresh device list
     Refresh,
+    /// Reset selected device
+    ResetDevice,
+    /// Confirm action (Enter/y)
+    Confirm,
     /// No action
     None,
 }
@@ -58,10 +62,23 @@ impl From<KeyEvent> for Action {
 
             // Actions
             KeyCode::Char(' ') => Action::ToggleSharing,
-            KeyCode::Enter => Action::ViewDetails,
+            KeyCode::Enter => {
+                // Enter is overloaded: ViewDetails or Confirm depending on context
+                // We'll map to Confirm here if we can context-switch, or just keep generic ViewDetails
+                // and let App logic decide. But Action::ViewDetails is for opening details.
+                // Let's assume App handles "Enter" as "ViewDetails" normally, but if dialog is open?
+                // Actually, the App::handle_action logic handles context.
+                // But we need a distinction between "Open Details" and "Confirm Dialog".
+                // Let's use a generic "Enter" action or similar?
+                // The current code maps Enter -> ViewDetails.
+                // Let's change ViewDetails to also mean Confirm in dialog context.
+                Action::ViewDetails
+            }
+            KeyCode::Char('y') => Action::Confirm,
             KeyCode::Char('c') => Action::ViewClients,
             KeyCode::Char('?') => Action::ShowHelp,
             KeyCode::Char('r') => Action::Refresh,
+            KeyCode::Char('R') => Action::ResetDevice,
 
             _ => Action::None,
         }

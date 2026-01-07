@@ -143,6 +143,41 @@ impl UsbIpHeader {
     }
 }
 
+/// USB/IP ISO packet descriptor
+///
+/// Used in isochronous transfers to describe each packet
+#[derive(Debug, Clone, Copy)]
+pub struct UsbIpIsoPacketDescriptor {
+    pub offset: u32,
+    pub length: u32,
+    pub actual_length: u32,
+    pub status: u32,
+}
+
+impl UsbIpIsoPacketDescriptor {
+    /// Size of ISO packet descriptor in bytes (16 bytes: 4 x u32)
+    pub const SIZE: usize = 16;
+
+    /// Read descriptor from reader
+    pub fn read_from<R: Read>(reader: &mut R) -> Result<Self> {
+        Ok(Self {
+            offset: reader.read_u32::<BigEndian>()?,
+            length: reader.read_u32::<BigEndian>()?,
+            actual_length: reader.read_u32::<BigEndian>()?,
+            status: reader.read_u32::<BigEndian>()?,
+        })
+    }
+
+    /// Write descriptor to writer
+    pub fn write_to<W: Write>(&self, writer: &mut W) -> Result<()> {
+        writer.write_u32::<BigEndian>(self.offset)?;
+        writer.write_u32::<BigEndian>(self.length)?;
+        writer.write_u32::<BigEndian>(self.actual_length)?;
+        writer.write_u32::<BigEndian>(self.status)?;
+        Ok(())
+    }
+}
+
 /// USB/IP CMD_SUBMIT payload
 ///
 /// Follows the common header when vhci_hcd sends a USB request
@@ -161,6 +196,8 @@ pub struct UsbIpCmdSubmit {
     pub interval: u32,
     /// Setup packet for control transfers (8 bytes)
     pub setup: [u8; 8],
+    /// ISO packet descriptors (only if number_of_packets > 0)
+    pub iso_packets: Vec<UsbIpIsoPacketDescriptor>,
 }
 
 #[allow(dead_code)]
@@ -183,6 +220,21 @@ impl UsbIpCmdSubmit {
 
         // NO padding - kernel struct is __packed (28 bytes total)
 
+        /*
+        // Read ISO descriptors if number_of_packets > 0
+        let mut iso_packets = Vec::new();
+        if number_of_packets > 0 {
+            for _ in 0..number_of_packets {
+                iso_packets.push(UsbIpIsoPacketDescriptor::read_from(reader)?);
+            }
+        }
+        */
+
+        // Create empty vector for now to satisfy struct initialization
+        // This is a temporary workaround until ISO support is fully implemented
+        #[allow(unused_mut)]
+        let mut iso_packets: Vec<UsbIpIsoPacketDescriptor> = Vec::new();
+
         Ok(Self {
             transfer_flags,
             transfer_buffer_length,
@@ -190,10 +242,11 @@ impl UsbIpCmdSubmit {
             number_of_packets,
             interval,
             setup,
+            iso_packets,
         })
     }
 
-    /// Write CMD_SUBMIT to a writer (28 bytes total)
+    /// Write CMD_SUBMIT to a writer (28 bytes total + optional ISO descriptors)
     pub fn write_to<W: Write>(&self, writer: &mut W) -> Result<()> {
         writer.write_u32::<BigEndian>(self.transfer_flags)?;
         writer.write_u32::<BigEndian>(self.transfer_buffer_length)?;
@@ -202,7 +255,10 @@ impl UsbIpCmdSubmit {
         writer.write_u32::<BigEndian>(self.interval)?;
         writer.write_all(&self.setup)?;
 
-        // NO padding - kernel struct is __packed (28 bytes total)
+        // Write ISO descriptors if any
+        for packet in &self.iso_packets {
+            packet.write_to(writer)?;
+        }
 
         Ok(())
     }
@@ -384,7 +440,17 @@ pub async fn usbip_to_usb_request(
         // The Linux kernel sets interval=1 for bulk endpoints too.
         // Typical interrupt polling intervals are >= 8ms, so use that as threshold.
         // For interval <= 1, default to Bulk which is more common and works for printers.
-        if cmd.interval > 1 {
+    /*
+    if cmd.number_of_packets > 0 {
+        // Isochronous transfer
+        let packet_lengths = cmd.iso_packets.iter().map(|p| p.length).collect();
+        TransferType::Isochronous {
+            endpoint,
+            data: transfer_data,
+            packet_lengths,
+            timeout_ms,
+        }
+    } else */ if cmd.interval > 1 {
             // Interrupt transfer (has meaningful polling interval)
             TransferType::Interrupt {
                 endpoint,
@@ -466,6 +532,7 @@ mod tests {
             number_of_packets: 0,
             interval: 0,
             setup: [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 0x12, 0x00],
+            iso_packets: Vec::new(),
         };
 
         let mut buf = Vec::new();

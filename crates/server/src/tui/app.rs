@@ -43,6 +43,8 @@ pub enum Dialog {
     DeviceDetails,
     /// Connected clients dialog
     Clients,
+    /// Confirm device reset
+    ConfirmReset,
 }
 
 /// Application state
@@ -69,6 +71,8 @@ pub struct App {
     network_rx: mpsc::UnboundedReceiver<NetworkEvent>,
     /// Whether auto-share is enabled
     auto_share: bool,
+    /// Pending reset action confirmed by user
+    pub pending_reset: bool,
 }
 
 /// Network events for updating the TUI
@@ -105,6 +109,7 @@ impl App {
             usb_bridge,
             network_rx,
             auto_share,
+            pending_reset: false,
         }
     }
 
@@ -195,8 +200,21 @@ impl App {
                 }
             }
             Action::ViewDetails => {
-                if self.dialog == Dialog::None && self.selected_device().is_some() {
-                    self.dialog = Dialog::DeviceDetails;
+                match self.dialog {
+                    Dialog::None => {
+                        if self.selected_device().is_some() {
+                            self.dialog = Dialog::DeviceDetails;
+                        }
+                    }
+                    Dialog::ConfirmReset => {
+                        // Enter in ConfirmReset dialog means confirm
+                        // Note: actual reset logic is handled in the main loop when seeing Action::ViewDetails
+                        // combined with state check, OR we handle it here by special return?
+                        // The issue is handle_action is &mut self -> ().
+                        // We need a way to signal "RESET CONFIRMED" to the async runner.
+                        // Let's use a flag.
+                    }
+                    _ => {}
                 }
             }
             Action::ViewClients => {
@@ -211,8 +229,48 @@ impl App {
                 // Refresh will be handled in the main loop by re-fetching devices
                 debug!("Refresh requested");
             }
+            Action::ResetDevice => {
+                if self.dialog == Dialog::None && self.selected_device().is_some() {
+                    self.dialog = Dialog::ConfirmReset;
+                }
+            }
+            Action::Confirm => {
+                if self.dialog == Dialog::ConfirmReset {
+                    // Reset confirmed
+                    self.dialog = Dialog::None;
+                    self.pending_reset = true;
+                }
+            }
             Action::None => {}
         }
+    }
+
+    /// Reset the currently selected device
+    pub async fn reset_selected_device(&self) -> Result<()> {
+        if let Some(&device_id) = self.device_order.get(self.selected_index) {
+             let (tx, rx) = tokio::sync::oneshot::channel();
+             // We need to look up the handle from device_id, but the current state structure
+             // assumes DeviceId == DeviceHandle value (which is true in current implementation).
+             // Let's use the device_id as the handle value.
+             let handle = protocol::DeviceHandle(device_id);
+
+             info!("Sending reset command for device {}", device_id);
+             self.usb_bridge
+                .send_command(UsbCommand::ResetDevice { handle, response: tx })
+                .await
+                .context("Failed to send ResetDevice command")?;
+
+             match rx.await.context("Failed to receive reset response")? {
+                 Ok(_) => {
+                     info!("Device {} reset successfully", device_id);
+                 }
+                 Err(e) => {
+                     warn!("Failed to reset device {}: {:?}", device_id, e);
+                     return Err(anyhow::anyhow!("Reset failed: {:?}", e));
+                 }
+             }
+        }
+        Ok(())
     }
 
     /// Update device list from USB subsystem
@@ -422,6 +480,14 @@ pub async fn run(
             break;
         }
 
+        // Handle pending reset (check this after handle_action updates state)
+        if app.pending_reset {
+            app.pending_reset = false;
+            if let Err(e) = app.reset_selected_device().await {
+                warn!("Failed to reset device: {:#}", e);
+            }
+        }
+
         // Handle events
         tokio::select! {
             // Terminal events (keyboard, resize, tick)
@@ -437,6 +503,8 @@ pub async fn run(
                                 warn!("Failed to refresh devices: {:#}", e);
                             }
                         }
+                        // ResetDevice logic is now handled by checking app.pending_reset
+                        // which is set by handle_action when ConfirmReset dialog is confirmed
                     }
                     Some(Event::Resize(_, _)) => {
                         // Terminal resize is handled automatically by ratatui

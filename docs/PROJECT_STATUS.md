@@ -115,6 +115,23 @@ rust-p2p-usb is a high-performance Rust application for secure peer-to-peer USB 
 - max_retries now used in reconnection policy
 - Optimized response conversion (simple vs full ISO support)
 
+### Phase 4 Advanced Features (January 2025)
+
+**Multi-Client Device Sharing (DeviceAccessTracker):**
+- Three sharing modes: Exclusive (E), Shared (S), Read-Only (R)
+- Lock acquire/release with queue management for waiting clients
+- Configurable via SharingConfig (default_mode, lock_timeout, max_clients)
+- TUI displays sharing mode (E/S/R column) in device table
+
+**Device Passthrough Policies (PolicyEngine):**
+- Time window restrictions (e.g., "09:00-17:00") with timezone support
+- Session duration limits with automatic force-detach on expiration
+- Per-device client allowlists for fine-grained access control
+- Device class restrictions (block specific USB classes)
+- ForcedDetachNotification sent to clients when session expires
+- TUI shows time remaining column with visual warnings for expiring sessions
+- Configurable timezone_offset_hours for accurate time window calculations
+
 ---
 
 ## Known Issues
@@ -187,10 +204,12 @@ rust-p2p-usb/
 │   │   ├── src/network/          # Iroh server
 │   │   │   ├── server.rs         # Accept connections
 │   │   │   ├── connection.rs     # Client handling + rate limiting
-│   │   │   └── notification_aggregator.rs  # Event batching
-│   │   ├── src/config.rs         # TOML config
+│   │   │   ├── notification_aggregator.rs  # Event batching
+│   │   │   ├── device_access.rs  # DeviceAccessTracker (sharing modes)
+│   │   │   └── policy_engine.rs  # PolicyEngine (time/session/class policies)
+│   │   ├── src/config.rs         # TOML config (+ SharingConfig, policies)
 │   │   ├── src/service.rs        # Systemd integration
-│   │   └── src/tui/              # TUI with metrics display
+│   │   └── src/tui/              # TUI with metrics + sharing mode display
 │   │
 │   └── client/                   # Client binary [95%]
 │       ├── src/main.rs           # Entry point, CLI

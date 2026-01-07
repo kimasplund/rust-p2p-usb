@@ -285,6 +285,8 @@ When working on this project:
 - Notification aggregation for TUI responsiveness
 - USB 3.0 helpers (port_range_for_speed, optimal_urb_buffer_size)
 - Multi-server configuration with all_servers() merging
+- Multi-client device sharing (DeviceAccessTracker with Exclusive/Shared/Read-Only modes)
+- Device passthrough policies (PolicyEngine: time windows, session limits, client allowlists, class restrictions)
 
 ### Not Yet Implemented
 - Isochronous transfers (infrastructure present, disabled)
@@ -304,6 +306,8 @@ When working on this project:
 - Added USB 3.0 helpers for speed-aware port allocation
 - Wired detach_all_from_server() for clean disconnect handling
 - Enhanced TUI with TX/RX, latency, and throughput metrics
+- **Phase 4 Complete**: Multi-client device sharing (DeviceAccessTracker with E/S/R modes)
+- **Phase 4 Complete**: Device passthrough policies (PolicyEngine with time windows, session limits, allowlists)
 
 See `/docs/PROJECT_STATUS.md` for detailed status and `/docs/CHANGELOG.md` for change history.
 

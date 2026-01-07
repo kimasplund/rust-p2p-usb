@@ -102,6 +102,23 @@ The following components were integrated in January 2025:
 - Transfer metrics - `record_transfer()`, `rolling_window_duration()`, public `SAMPLE_INTERVAL_MS`
 - Protocol SIZE constants - compile-time validated via assertions
 
+### Phase 4 Advanced Features (January 2025)
+
+**Multi-Client Device Sharing (DeviceAccessTracker):**
+- Three sharing modes: Exclusive (E), Shared (S), Read-Only (R)
+- Lock acquire/release with queue management for waiting clients
+- Configurable via SharingConfig (default_mode, lock_timeout, max_clients)
+- TUI displays sharing mode (E/S/R column) in device table
+
+**Device Passthrough Policies (PolicyEngine):**
+- Time window restrictions (e.g., "09:00-17:00") with timezone support
+- Session duration limits with automatic force-detach on expiration
+- Per-device client allowlists for fine-grained access control
+- Device class restrictions (block specific USB classes)
+- ForcedDetachNotification sent to clients when session expires
+- TUI shows time remaining column with visual warnings for expiring sessions
+- Configurable timezone_offset_hours for accurate time window calculations
+
 ---
 
 ## System Architecture
@@ -157,6 +174,8 @@ The following components were integrated in January 2025:
 - Rate limiting for bandwidth control on transfers
 - Notification aggregation for batching rapid device events
 - Per-client/per-device metrics tracking
+- Multi-client device sharing (DeviceAccessTracker with E/S/R modes)
+- Device passthrough policies (PolicyEngine for time/session/class restrictions)
 
 **Client Binary** (`crates/client`):
 - Connect to server using NodeId
@@ -210,11 +229,13 @@ rust-p2p-usb/
 │   │       │   ├── session.rs           # Per-client session management
 │   │       │   ├── streams.rs           # QUIC stream multiplexing
 │   │       │   ├── connection.rs        # Client handling + rate limiting
-│   │       │   └── notification_aggregator.rs  # Event batching for TUI
+│   │       │   ├── notification_aggregator.rs  # Event batching for TUI
+│   │       │   ├── device_access.rs     # DeviceAccessTracker (E/S/R modes)
+│   │       │   └── policy_engine.rs     # PolicyEngine (time/session policies)
 │   │       ├── tui/
 │   │       │   ├── mod.rs               # TUI public API
 │   │       │   ├── app.rs               # Application state + metrics display
-│   │       │   ├── ui.rs                # Ratatui rendering
+│   │       │   ├── ui.rs                # Ratatui rendering (sharing mode, time remaining)
 │   │       │   └── events.rs            # Input handling
 │   │       └── service.rs               # Systemd integration
 │   │

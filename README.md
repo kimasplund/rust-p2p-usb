@@ -22,6 +22,8 @@ A high-performance Rust application that enables secure USB device sharing betwe
 - **Rate limiting** - Bandwidth control with atomic try_consume/rollback operations
 - **Notification aggregation** - Batches rapid device events for TUI responsiveness
 - **Per-client metrics** - TX/RX bytes, latency, and throughput per client
+- **Multi-client device sharing** - Three sharing modes (Exclusive/Shared/Read-Only) with lock queue management
+- **Device passthrough policies** - Time window restrictions, session duration limits, client allowlists, and device class restrictions
 
 ### Client
 - **Remote device access** - Connect to USB devices over the internet
@@ -208,6 +210,28 @@ require_approval = true
 [iroh]
 # Optional: specify custom Iroh relay servers
 # relay_servers = ["https://relay.example.com"]
+
+[sharing]
+# Default sharing mode: "exclusive", "shared", or "read_only"
+default_mode = "exclusive"
+
+# Lock timeout in seconds (how long to wait for device lock)
+lock_timeout = 30
+
+# Maximum concurrent clients per device (for shared mode)
+max_clients = 4
+
+[policies]
+# Timezone offset in hours for time window calculations (e.g., -5 for EST)
+timezone_offset_hours = 0
+
+# Per-device policies can be configured:
+# [[policies.devices]]
+# device_id = "1234:5678"
+# time_window = "09:00-17:00"
+# session_limit_seconds = 3600
+# allowed_clients = ["client_node_id_1"]
+# blocked_classes = [0x03]  # Block HID devices
 ```
 
 ### Client Configuration
@@ -627,9 +651,9 @@ RUST_LOG=debug p2p-usb-server 2>&1 | tee server.log
 - [x] Bandwidth usage statistics (per-client, per-device metrics)
 - [x] Hot-plug notification to clients (notification aggregator)
 
-### Phase 4: Advanced Features (v1.0) - IN PROGRESS
-- [ ] Multi-client support (device sharing)
-- [ ] Device passthrough policies (time-based access)
+### Phase 4: Advanced Features (v1.0) - COMPLETE
+- [x] Multi-client device sharing (DeviceAccessTracker with Exclusive/Shared/Read-Only modes)
+- [x] Device passthrough policies (time windows, session limits, client allowlists, class restrictions)
 - [x] Bandwidth limiting and QoS (rate limiter with atomic ops)
 - [ ] macOS client support
 - [ ] Windows client support

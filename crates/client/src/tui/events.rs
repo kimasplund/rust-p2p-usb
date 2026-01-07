@@ -37,12 +37,19 @@ impl EventHandler {
     /// Poll for next event
     ///
     /// Returns Some(Event) if an event occurred, None if tick timeout elapsed.
-    pub fn poll(&self) -> Result<Option<Event>> {
-        if event::poll(self.tick_rate)? {
-            Ok(Some(event::read()?))
-        } else {
-            Ok(None)
-        }
+    /// Poll for next event
+    ///
+    /// Returns Some(Event) if an event occurred, None if tick timeout elapsed.
+    pub async fn poll(&self) -> Result<Option<Event>> {
+        let tick_rate = self.tick_rate;
+        tokio::task::spawn_blocking(move || {
+            if event::poll(tick_rate)? {
+                Ok(Some(event::read()?))
+            } else {
+                Ok(None)
+            }
+        })
+        .await?
     }
 
     /// Handle a key event and return the resulting action

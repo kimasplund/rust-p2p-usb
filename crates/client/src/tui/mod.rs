@@ -39,6 +39,7 @@ use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 use crate::config::ClientConfig;
+use crate::network::ConnectionState;
 use crate::network::IrohClient;
 use crate::virtual_usb::VirtualUsbManager;
 
@@ -135,25 +136,34 @@ impl TuiRunner {
         // Initial render
         self.terminal.draw(|f| ui::render(f, &self.app))?;
 
+        // Subscribe to connection state updates
+        let mut state_rx = self.client.subscribe();
+
         loop {
-            // Process any pending messages from async tasks
-            while let Ok(msg) = self.message_rx.try_recv() {
-                self.handle_message(msg);
-            }
+            tokio::select! {
+                // Handle connection state updates
+                Ok((endpoint_id, state)) = state_rx.recv() => {
+                    self.handle_action(AppAction::ConnectionStateChanged(endpoint_id, state)).await?;
+                }
+                // Process any pending messages from async tasks
+                Some(msg) = self.message_rx.recv() => {
+                    self.handle_message(msg);
+                }
+                // Poll for terminal events
+                Ok(Some(event)) = self.event_handler.poll() => {
+                    let action = match event {
+                        Event::Key(key) => self.event_handler.handle_key(&mut self.app, key),
+                        Event::Resize(_, _) => {
+                            // Terminal will re-render on next draw
+                            AppAction::None
+                        }
+                        _ => AppAction::None,
+                    };
 
-            // Poll for terminal events
-            if let Some(event) = self.event_handler.poll()? {
-                let action = match event {
-                    Event::Key(key) => self.event_handler.handle_key(&mut self.app, key),
-                    Event::Resize(_, _) => {
-                        // Terminal will re-render on next draw
-                        AppAction::None
-                    }
-                    _ => AppAction::None,
-                };
-
-                // Handle the action
-                self.handle_action(action).await?;
+                    // Handle the action
+                    self.handle_action(action).await?;
+                }
+                else => break, // Channels closed
             }
 
             // Check if we should quit
@@ -280,6 +290,30 @@ impl TuiRunner {
                 }
                 Err(e) => {
                     self.app.set_status(format!("Invalid EndpointId: {}", e));
+                }
+            },
+            AppAction::ConnectionStateChanged(endpoint_id, state) => match state {
+                ConnectionState::Connected => {
+                    self.app
+                        .update_server_status(&endpoint_id, ServerStatus::Connected);
+                    self.app
+                        .set_status(format!("Connected to {}", truncate_id(&endpoint_id)));
+                }
+                ConnectionState::Disconnected => {
+                    self.app
+                        .update_server_status(&endpoint_id, ServerStatus::Disconnected);
+                    self.app
+                        .set_status(format!("Disconnected from {}", truncate_id(&endpoint_id)));
+                }
+                ConnectionState::Reconnecting(attempt, delay) => {
+                    self.app
+                        .update_server_status(&endpoint_id, ServerStatus::Connecting);
+                    self.app.set_status(format!(
+                        "Reconnecting to {} (attempt {} in {:.1}s)...",
+                        truncate_id(&endpoint_id),
+                        attempt,
+                        delay.as_secs_f32()
+                    ));
                 }
             },
         }

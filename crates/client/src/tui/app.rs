@@ -3,6 +3,7 @@
 //! Manages the application state including server connections, device lists,
 //! two-pane navigation, and popup dialogs.
 
+use crate::network::ConnectionState;
 use iroh::PublicKey as EndpointId;
 use protocol::{DeviceHandle, DeviceId, DeviceInfo};
 use std::collections::HashMap;
@@ -105,6 +106,8 @@ pub enum AppAction {
     RefreshDevices(EndpointId),
     /// Add a new server by EndpointId string
     AddServer(String),
+    /// Connection state changed
+    ConnectionStateChanged(EndpointId, ConnectionState),
 }
 
 /// Main application state

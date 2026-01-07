@@ -561,7 +561,7 @@ RUST_LOG=debug p2p-usb-server 2>&1 | tee server.log
 - [x] Terminal UI (TUI) for server and client
 - [ ] Error recovery and reconnection
 - [ ] Performance metrics display
-- [ ] Device filtering by VID/PID
+- [x] Device filtering by VID/PID
 
 ### Phase 3: Enhanced Features (v0.3)
 - [ ] Isochronous transfers (for audio/video devices)

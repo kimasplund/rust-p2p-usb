@@ -8,4 +8,4 @@ pub mod device_proxy;
 pub mod session;
 
 // Re-export public types
-pub use client::{ClientConfig, IrohClient};
+pub use client::{ClientConfig, ConnectionState, IrohClient};

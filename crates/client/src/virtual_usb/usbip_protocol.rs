@@ -380,15 +380,19 @@ pub async fn usbip_to_usb_request(
             data
         };
 
-        if cmd.interval > 0 {
-            // Interrupt transfer (has polling interval)
+        // USB/IP interval field is unreliable for determining transfer type.
+        // The Linux kernel sets interval=1 for bulk endpoints too.
+        // Typical interrupt polling intervals are >= 8ms, so use that as threshold.
+        // For interval <= 1, default to Bulk which is more common and works for printers.
+        if cmd.interval > 1 {
+            // Interrupt transfer (has meaningful polling interval)
             TransferType::Interrupt {
                 endpoint,
                 data: transfer_data,
                 timeout_ms,
             }
         } else {
-            // Bulk transfer
+            // Bulk transfer (interval=0 or interval=1 which is commonly set for bulk)
             TransferType::Bulk {
                 endpoint,
                 data: transfer_data,

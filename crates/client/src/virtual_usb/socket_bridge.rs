@@ -197,8 +197,8 @@ impl SocketBridge {
             match message {
                 UsbIpMessage::Submit { header, cmd, data } => {
                     eprintln!(
-                        "[SocketBridge] Received CMD_SUBMIT: seqnum={}, ep={}, direction={}, transfer_len={}, setup={:02x?}",
-                        header.seqnum, header.ep, header.direction, cmd.transfer_buffer_length, cmd.setup
+                        "[SocketBridge] Received CMD_SUBMIT: seqnum={}, ep={}, direction={}, transfer_len={}, interval={}, setup={:02x?}",
+                        header.seqnum, header.ep, header.direction, cmd.transfer_buffer_length, cmd.interval, cmd.setup
                     );
                     debug!(
                         "Received CMD_SUBMIT: seqnum={}, ep={}, direction={}",

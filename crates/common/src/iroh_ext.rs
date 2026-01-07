@@ -14,5 +14,5 @@ pub const ALPN_PROTOCOL: &[u8] = b"rust-p2p-usb/1";
 /// Creates a random PublicKey that can be used as an endpoint ID in tests.
 #[cfg(test)]
 pub fn generate_test_endpoint_id() -> iroh::PublicKey {
-    iroh::SecretKey::generate(&mut rand::thread_rng()).public()
+    iroh::SecretKey::generate(&mut rand::rng()).public()
 }

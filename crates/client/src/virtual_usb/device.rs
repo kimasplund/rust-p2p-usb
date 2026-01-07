@@ -194,25 +194,6 @@ impl VirtualDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::DeviceSpeed;
-
-    fn create_test_device_info() -> DeviceInfo {
-        DeviceInfo {
-            id: protocol::DeviceId(1),
-            vendor_id: 0x1234,
-            product_id: 0x5678,
-            bus_number: 1,
-            device_address: 5,
-            manufacturer: Some("Test Manufacturer".to_string()),
-            product: Some("Test Device".to_string()),
-            serial_number: Some("ABC123".to_string()),
-            class: 0x08,
-            subclass: 0x06,
-            protocol: 0x50,
-            speed: DeviceSpeed::High,
-            num_configurations: 1,
-        }
-    }
 
     #[test]
     fn test_request_id_uniqueness() {

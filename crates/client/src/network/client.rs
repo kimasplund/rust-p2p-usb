@@ -90,6 +90,11 @@ impl ReconnectionPolicy {
         let capped_delay = delay_secs.min(self.max_delay.as_secs_f64());
         Duration::from_secs_f64(capped_delay)
     }
+
+    /// Check if maximum retries exceeded
+    fn max_retries_exceeded(&self, attempt: u32) -> bool {
+        self.max_retries.is_some_and(|max| attempt > max)
+    }
 }
 
 /// Iroh P2P client for connecting to USB servers
@@ -226,6 +231,17 @@ impl IrohClient {
                         *attempts += 1;
 
                         let attempt_count = *attempts;
+
+                        // Check if we've exceeded max retries
+                        if policy.max_retries_exceeded(attempt_count) {
+                            warn!(
+                                "Max retries ({}) exceeded for {}, giving up reconnection",
+                                policy.max_retries.unwrap_or(0), server_id
+                            );
+                            let _ = state_updates.send((*server_id, ConnectionState::Disconnected));
+                            continue;
+                        }
+
                         let delay = policy.delay_for_attempt(attempt_count);
 
                         debug!(
@@ -670,6 +686,19 @@ impl IrohClient {
             metrics.insert(*server_id, conn.health_metrics().await);
         }
         metrics
+    }
+
+    /// Check if a server connection is healthy
+    ///
+    /// Returns true if connected and not in disconnected state.
+    /// Returns false if not connected or connection has timed out.
+    pub async fn is_server_healthy(&self, server_id: EndpointId) -> bool {
+        let connections = self.connections.lock().await;
+        if let Some(conn) = connections.get(&server_id) {
+            conn.health_monitor().is_healthy().await
+        } else {
+            false
+        }
     }
 
     /// Shutdown the client gracefully

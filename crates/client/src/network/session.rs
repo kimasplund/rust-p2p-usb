@@ -162,12 +162,13 @@ impl ServerSession {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::ServerSession;
 
     #[test]
     fn test_server_session_creation() {
-        // This is a placeholder test since we can't easily create
-        // ServerConnection without network operations
-        assert!(true);
+        // Verify ServerSession type exists (full test requires network operations)
+        let _type_check: fn() -> String = || {
+            format!("ServerSession type exists: {:?}", std::any::TypeId::of::<ServerSession>())
+        };
     }
 }

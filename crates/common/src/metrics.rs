@@ -12,7 +12,12 @@ use std::time::{Duration, Instant};
 const ROLLING_WINDOW_SIZE: usize = 100;
 
 /// Sample interval for rolling window (100ms)
-const SAMPLE_INTERVAL_MS: u64 = 100;
+pub const SAMPLE_INTERVAL_MS: u64 = 100;
+
+/// Calculate the rolling window duration from sample interval and window size
+pub fn rolling_window_duration() -> Duration {
+    Duration::from_millis(SAMPLE_INTERVAL_MS * ROLLING_WINDOW_SIZE as u64)
+}
 
 /// A single latency measurement
 #[derive(Debug, Clone, Copy)]
@@ -209,7 +214,7 @@ impl Default for TransferMetrics {
 impl TransferMetrics {
     /// Create new transfer metrics
     pub fn new() -> Self {
-        let window = Duration::from_secs(10);
+        let window = rolling_window_duration();
         Self {
             bytes_sent: AtomicU64::new(0),
             bytes_received: AtomicU64::new(0),
@@ -278,6 +283,25 @@ impl TransferMetrics {
     pub fn transfer_failed(&self) {
         self.active_transfers.fetch_sub(1, Ordering::Relaxed);
         self.transfers_failed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a transfer with success/failure indication
+    ///
+    /// Convenience method that calls either transfer_completed or transfer_failed
+    /// based on the success parameter.
+    pub fn record_transfer(
+        &self,
+        bytes_sent: u64,
+        bytes_received: u64,
+        latency: Duration,
+        success: bool,
+    ) {
+        self.transfer_started();
+        if success {
+            self.transfer_completed(bytes_sent, bytes_received, latency);
+        } else {
+            self.transfer_failed();
+        }
     }
 
     /// Record a retry
@@ -369,14 +393,15 @@ impl TransferMetrics {
         self.transfers_failed.store(0, Ordering::Relaxed);
         self.retries.store(0, Ordering::Relaxed);
 
+        let window = rolling_window_duration();
         if let Ok(mut stats) = self.latency_stats.write() {
-            *stats = RollingStats::new(Duration::from_secs(10));
+            *stats = RollingStats::new(window);
         }
         if let Ok(mut tx) = self.throughput_tx.write() {
-            *tx = RollingThroughput::new(Duration::from_secs(10));
+            *tx = RollingThroughput::new(window);
         }
         if let Ok(mut rx) = self.throughput_rx.write() {
-            *rx = RollingThroughput::new(Duration::from_secs(10));
+            *rx = RollingThroughput::new(window);
         }
     }
 }

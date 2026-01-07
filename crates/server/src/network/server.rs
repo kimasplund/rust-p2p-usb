@@ -4,7 +4,10 @@
 //! and spawns per-client connection handlers.
 
 use anyhow::{Context, Result, anyhow};
-use common::{ALPN_PROTOCOL, UsbBridge, load_or_generate_secret_key};
+use common::{
+    ALPN_PROTOCOL, BandwidthLimit, RateLimiter, SharedRateLimiter, UsbBridge,
+    load_or_generate_secret_key,
+};
 use iroh::{Endpoint, PublicKey as EndpointId};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -30,6 +33,8 @@ pub struct IrohServer {
     config: ServerConfig,
     /// Audit logger
     audit_logger: SharedAuditLogger,
+    /// Rate limiter for bandwidth control (optional, shared across all connections)
+    rate_limiter: Option<SharedRateLimiter>,
 }
 
 impl IrohServer {
@@ -80,12 +85,42 @@ impl IrohServer {
             warn!("Client allowlist disabled - accepting all connections");
         }
 
+        // Create rate limiter if bandwidth limiting is enabled
+        let rate_limiter = if config.bandwidth.enabled {
+            let global_limit = config.bandwidth.global_limit_bps().map(|bps| {
+                let burst = (bps as f64 * config.bandwidth.burst_multiplier) as u64;
+                BandwidthLimit::new(bps, Some(burst))
+            });
+
+            let per_client_limit = config.bandwidth.per_client_limit_bps().map(|bps| {
+                let burst = (bps as f64 * config.bandwidth.burst_multiplier) as u64;
+                BandwidthLimit::new(bps, Some(burst))
+            });
+
+            let per_device_limit = config.bandwidth.per_device_limit_bps().map(|bps| {
+                let burst = (bps as f64 * config.bandwidth.burst_multiplier) as u64;
+                BandwidthLimit::new(bps, Some(burst))
+            });
+
+            let limiter = RateLimiter::new(global_limit, per_client_limit, per_device_limit);
+            info!(
+                "Rate limiter enabled: global={:?}, per_client={:?}, per_device={:?}",
+                config.bandwidth.global_limit,
+                config.bandwidth.per_client_limit,
+                config.bandwidth.per_device_limit
+            );
+            Some(Arc::new(limiter))
+        } else {
+            None
+        };
+
         Ok(Self {
             endpoint,
             usb_bridge,
             allowed_clients: Arc::new(RwLock::new(allowed_clients)),
             config,
             audit_logger,
+            rate_limiter,
         })
     }
 
@@ -123,6 +158,7 @@ impl IrohServer {
             let allowed_clients = self.allowed_clients.clone();
             let require_approval = self.config.security.require_approval;
             let audit_logger = self.audit_logger.clone();
+            let rate_limiter = self.rate_limiter.clone();
 
             tokio::spawn(async move {
                 if let Err(e) = Self::handle_connection(
@@ -131,6 +167,7 @@ impl IrohServer {
                     allowed_clients,
                     require_approval,
                     audit_logger,
+                    rate_limiter,
                 )
                 .await
                 {
@@ -151,6 +188,7 @@ impl IrohServer {
         allowed_clients: Arc<RwLock<HashSet<EndpointId>>>,
         require_approval: bool,
         audit_logger: SharedAuditLogger,
+        rate_limiter: Option<SharedRateLimiter>,
     ) -> Result<()> {
         // Wait for connection to establish
         let connection = incoming.await.context("Failed to establish connection")?;
@@ -192,6 +230,7 @@ impl IrohServer {
             connection,
             usb_bridge,
             audit_logger.clone(),
+            rate_limiter,
         );
 
         client_conn.run().await?;

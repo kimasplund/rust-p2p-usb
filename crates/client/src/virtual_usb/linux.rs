@@ -387,6 +387,13 @@ impl LinuxVirtualUsbManager {
     /// sharing the same VHCI. Uses bitmap-based allocation to find the first
     /// free port and mark it as allocated.
     async fn allocate_port(&self, speed: DeviceSpeed) -> Result<u8> {
+        // Get valid port range for this device speed
+        let (port_start, port_end) = port_range_for_speed(speed);
+        debug!(
+            "Allocating port for {:?} device (valid range: {}-{})",
+            speed, port_start, port_end
+        );
+
         // Re-read kernel status to get accurate port state
         // This handles multiple client processes sharing the VHCI
         // If reading fails (e.g., in tests or if VHCI isn't accessible),
@@ -460,12 +467,12 @@ impl LinuxVirtualUsbManager {
     /// Clears the corresponding bit in the port bitmap based on port number.
     /// Safe to call with already-free ports (idempotent).
     async fn free_port(&self, port: u8) {
-        if port < 8 {
+        if is_high_speed_port(port) {
             // High-speed port (0-7)
             let mut bitmap = self.hs_ports.write().await;
             *bitmap &= !(1 << port);
             debug!("Freed high-speed port {} (bitmap: {:08b})", port, *bitmap);
-        } else if port < 16 {
+        } else if is_superspeed_port(port) {
             // Super-speed port (8-15), stored as bits 0-7 in ss_ports
             let bit = port - 8;
             let mut bitmap = self.ss_ports.write().await;

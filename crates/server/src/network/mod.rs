@@ -27,5 +27,4 @@ pub mod notification_aggregator;
 pub mod server;
 
 // Re-export public types
-pub use notification_aggregator::{NotificationAggregator, PendingNotification};
 pub use server::IrohServer;

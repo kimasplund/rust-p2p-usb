@@ -572,11 +572,14 @@ fn render_help_dialog(frame: &mut Frame) {
 
 /// Render the device details dialog
 fn render_device_details_dialog(frame: &mut Frame, app: &App) {
-    let area = centered_rect(50, 60, frame.area());
+    let area = centered_rect(55, 75, frame.area());
 
     let content = if let Some(device) = app.selected_device() {
         let info = &device.info;
-        vec![
+        let device_id = app.selected_device_id();
+        let device_metrics = device_id.and_then(|id| app.device_metrics(id));
+
+        let mut lines = vec![
             Line::from(vec![
                 Span::styled("Device ID:       ", Style::default().fg(Color::DarkGray)),
                 Span::styled(format!("{}", info.id.0), Style::default().fg(Color::White)),
@@ -681,7 +684,71 @@ fn render_device_details_dialog(frame: &mut Frame, app: &App) {
                     Style::default().fg(Color::Cyan),
                 ),
             ]),
-        ]
+        ];
+
+        // Add device metrics if available
+        if let Some(metrics) = device_metrics {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(
+                "Transfer Statistics",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+            lines.push(Line::from(vec![
+                Span::styled("TX:              ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    metrics.format_bytes_sent(),
+                    Style::default().fg(Color::White),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("RX:              ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    metrics.format_bytes_received(),
+                    Style::default().fg(Color::White),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Transfers:       ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{}", metrics.transfers_completed),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::raw(" / "),
+                Span::styled(
+                    format!("{} failed", metrics.transfers_failed),
+                    Style::default().fg(if metrics.transfers_failed > 0 {
+                        Color::Red
+                    } else {
+                        Color::DarkGray
+                    }),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Latency (avg):   ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    metrics.latency.format_avg(),
+                    Style::default().fg(Color::White),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Throughput TX:   ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    metrics.format_throughput_tx(),
+                    Style::default().fg(Color::Cyan),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Throughput RX:   ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    metrics.format_throughput_rx(),
+                    Style::default().fg(Color::Magenta),
+                ),
+            ]));
+        }
+
+        lines
     } else {
         vec![Line::from("No device selected")]
     };
@@ -702,7 +769,7 @@ fn render_device_details_dialog(frame: &mut Frame, app: &App) {
 
 /// Render the connected clients dialog
 fn render_clients_dialog(frame: &mut Frame, app: &App) {
-    let area = centered_rect(60, 50, frame.area());
+    let area = centered_rect(70, 60, frame.area());
 
     let mut lines = vec![
         Line::from(vec![
@@ -715,7 +782,92 @@ fn render_clients_dialog(frame: &mut Frame, app: &App) {
         Line::from(""),
     ];
 
-    // List devices with connected clients
+    // Show all clients with metrics
+    let client_ids = app.client_ids_with_metrics();
+    if client_ids.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No clients with metrics data",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        lines.push(Line::from(vec![Span::styled(
+            "Client Metrics",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]));
+        lines.push(Line::from(""));
+
+        for client_id in client_ids {
+            // Truncate client ID for display
+            let display_id = if client_id.len() > 20 {
+                format!("{}...", &client_id[..16])
+            } else {
+                client_id.to_string()
+            };
+
+            lines.push(Line::from(vec![Span::styled(
+                display_id,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+
+            // Get metrics for this client
+            if let Some(metrics) = app.client_metrics(client_id) {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled("TX: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        metrics.format_bytes_sent(),
+                        Style::default().fg(Color::White),
+                    ),
+                    Span::raw("  "),
+                    Span::styled("RX: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        metrics.format_bytes_received(),
+                        Style::default().fg(Color::White),
+                    ),
+                ]));
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled("Transfers: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("{}", metrics.transfers_completed),
+                        Style::default().fg(Color::Green),
+                    ),
+                    Span::raw(" / "),
+                    Span::styled(
+                        format!("{} failed", metrics.transfers_failed),
+                        Style::default().fg(if metrics.transfers_failed > 0 {
+                            Color::Red
+                        } else {
+                            Color::DarkGray
+                        }),
+                    ),
+                ]));
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled("Latency: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        metrics.latency.format_avg(),
+                        Style::default().fg(Color::White),
+                    ),
+                ]));
+            }
+            lines.push(Line::from(""));
+        }
+    }
+
+    // Also show devices with connected clients (existing behavior)
+    lines.push(Line::from(vec![Span::styled(
+        "Devices with Clients",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )]));
+    lines.push(Line::from(""));
+
     let devices = app.devices();
     let devices_with_clients: Vec<_> = devices
         .iter()
@@ -725,7 +877,7 @@ fn render_clients_dialog(frame: &mut Frame, app: &App) {
 
     if devices_with_clients.is_empty() {
         lines.push(Line::from(Span::styled(
-            "No clients currently connected to devices",
+            "No clients currently attached to devices",
             Style::default().fg(Color::DarkGray),
         )));
     } else {

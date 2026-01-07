@@ -5,13 +5,13 @@
 
 use anyhow::{Context, Result, anyhow};
 use common::UsbBridge;
-use common::{UsbCommand, UsbEvent};
+use common::{RateLimitResult, SharedRateLimiter, UsbCommand, UsbEvent};
 use iroh::PublicKey as EndpointId;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 
 use protocol::{
-    CURRENT_VERSION, DeviceHandle, DeviceId, Message, MessagePayload, RequestId, UsbRequest,
-    decode_framed, encode_framed, validate_version,
+    CURRENT_VERSION, DeviceHandle, DeviceId, DeviceRemovalReason, Message, MessagePayload,
+    RequestId, TransferType, UsbRequest, decode_framed, encode_framed, validate_version,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,6 +21,7 @@ use tokio::time;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::audit::{AuditResult, SharedAuditLogger};
+use crate::network::notification_aggregator::{NotificationAggregator, PendingNotification};
 
 /// Timeout for receiving messages (2 minutes)
 const MESSAGE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -61,6 +62,10 @@ pub struct ClientConnection {
     client_supports_push: bool,
     /// Audit logger for compliance logging
     audit_logger: SharedAuditLogger,
+    /// Rate limiter for bandwidth control (optional)
+    rate_limiter: Option<SharedRateLimiter>,
+    /// Notification aggregator for batching rapid device events
+    notification_aggregator: NotificationAggregator,
 }
 
 impl ClientConnection {
@@ -70,6 +75,7 @@ impl ClientConnection {
         connection: Connection,
         usb_bridge: UsbBridge,
         audit_logger: SharedAuditLogger,
+        rate_limiter: Option<SharedRateLimiter>,
     ) -> Self {
         Self {
             endpoint_id,
@@ -80,6 +86,8 @@ impl ClientConnection {
             last_activity: Instant::now(),
             client_supports_push: false,
             audit_logger,
+            rate_limiter,
+            notification_aggregator: NotificationAggregator::new(),
         }
     }
 
@@ -151,6 +159,11 @@ impl ClientConnection {
         });
 
         loop {
+            let flush_delay = self
+                .notification_aggregator
+                .time_until_flush()
+                .unwrap_or(Duration::from_secs(60));
+
             tokio::select! {
                 // Accept incoming QUIC bi-directional streams
                 stream_result = self.connection.accept_bi() => {
@@ -159,7 +172,6 @@ impl ClientConnection {
                             self.last_activity = Instant::now();
                             if let Err(e) = self.handle_stream(send, recv).await {
                                 error!("Stream handler error: {:#}", e);
-                                // Don't break on stream error, continue with other streams
                             }
                         }
                         Err(e) => {
@@ -184,6 +196,15 @@ impl ClientConnection {
                     }
                 }
 
+                // Flush aggregated notifications when window expires
+                _ = time::sleep(flush_delay), if self.notification_aggregator.has_pending() => {
+                    if self.notification_aggregator.should_flush() {
+                        if let Err(e) = self.flush_aggregated_notifications().await {
+                            warn!("Failed to flush aggregated notifications: {:#}", e);
+                        }
+                    }
+                }
+
                 // Timeout check (connection idle too long)
                 _ = time::sleep(Duration::from_secs(60)) => {
                     let idle_time = self.last_activity.elapsed();
@@ -191,6 +212,13 @@ impl ClientConnection {
                         warn!("Connection idle for {:?}, closing", idle_time);
                         break;
                     }
+                }
+            }
+
+            // Check for immediate flush after processing events (e.g., max notifications reached)
+            if self.notification_aggregator.should_flush() {
+                if let Err(e) = self.flush_aggregated_notifications().await {
+                    warn!("Failed to flush aggregated notifications: {:#}", e);
                 }
             }
         }
@@ -459,6 +487,46 @@ impl ClientConnection {
             });
         }
 
+        // Calculate transfer data size for rate limiting
+        let transfer_bytes = Self::get_transfer_data_size(&request.transfer);
+
+        // Apply rate limiting if enabled
+        if let Some(ref limiter) = self.rate_limiter {
+            let client_id = self.endpoint_id.to_string();
+            let device_id = self.attached_devices.get(&request.handle).map(|d| d.0);
+
+            // Check rate limit and wait if necessary
+            let result = limiter
+                .check(Some(&client_id), device_id, transfer_bytes)
+                .await;
+
+            match result {
+                RateLimitResult::Allowed => {
+                    // Use try_acquire to atomically check and consume tokens
+                    if !limiter
+                        .try_acquire(Some(&client_id), device_id, transfer_bytes)
+                        .await
+                    {
+                        trace!(
+                            "Rate limit: transfer {:?} delayed, tokens unavailable",
+                            request.id
+                        );
+                    }
+                }
+                RateLimitResult::Wait(duration) => {
+                    debug!(
+                        "Rate limit: transfer {:?} waiting {:?} for {} bytes",
+                        request.id, duration, transfer_bytes
+                    );
+                    tokio::time::sleep(duration).await;
+                    // Record the transfer after waiting
+                    limiter
+                        .record(Some(&client_id), device_id, transfer_bytes)
+                        .await;
+                }
+            }
+        }
+
         // Create cancellation channel for this transfer
         let (cancel_tx, mut cancel_rx) = broadcast::channel::<()>(1);
         let pending = PendingTransfer {
@@ -523,6 +591,16 @@ impl ClientConnection {
         }
 
         Ok(MessagePayload::TransferComplete { response })
+    }
+
+    /// Get the data size of a transfer for rate limiting
+    fn get_transfer_data_size(transfer: &TransferType) -> u64 {
+        match transfer {
+            TransferType::Control { data, .. } => data.len() as u64,
+            TransferType::Interrupt { data, .. } => data.len() as u64,
+            TransferType::Bulk { data, .. } => data.len() as u64,
+            TransferType::Isochronous { data, .. } => data.len() as u64,
+        }
     }
 
     /// Handle GetSharingStatusRequest
@@ -648,18 +726,38 @@ impl ClientConnection {
         Ok(())
     }
 
+    /// Flush aggregated notifications to the client
+    async fn flush_aggregated_notifications(&mut self) -> Result<()> {
+        if let Some(notifications) = self.notification_aggregator.flush() {
+            if notifications.is_empty() {
+                return Ok(());
+            }
+
+            debug!(
+                "Flushing {} aggregated notifications to client",
+                notifications.len()
+            );
+
+            self.send_push_notification(MessagePayload::AggregatedNotifications { notifications })
+                .await
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Queue a device notification through the aggregator
+    fn queue_device_notification(&mut self, notification: PendingNotification) {
+        let device_id = notification.device_id();
+        debug!("Queuing notification for device {:?}", device_id);
+        self.notification_aggregator.add(notification);
+    }
+
     /// Handle USB events from the USB subsystem
     async fn handle_usb_event(&mut self, event: UsbEvent) -> Result<()> {
         match event {
             UsbEvent::DeviceArrived { device } => {
                 debug!("Device arrived: {:?}", device.id);
-                // Send push notification to client
-                if let Err(e) = self
-                    .send_push_notification(MessagePayload::DeviceArrivedNotification { device })
-                    .await
-                {
-                    warn!("Failed to send device arrived notification: {:#}", e);
-                }
+                self.queue_device_notification(PendingNotification::Arrived(device));
             }
 
             UsbEvent::DeviceLeft {
@@ -714,17 +812,12 @@ impl ClientConnection {
                     info!("Auto-detached device (fallback): handle={:?}", handle);
                 }
 
-                // Send push notification to client
-                if let Err(e) = self
-                    .send_push_notification(MessagePayload::DeviceRemovedNotification {
-                        device_id,
-                        invalidated_handles,
-                        reason: protocol::DeviceRemovalReason::Unplugged,
-                    })
-                    .await
-                {
-                    warn!("Failed to send device removed notification: {:#}", e);
-                }
+                // Queue aggregated notification
+                self.queue_device_notification(PendingNotification::Removed {
+                    device_id,
+                    invalidated_handles,
+                    reason: DeviceRemovalReason::Unplugged,
+                });
             }
 
             UsbEvent::DeviceAvailable {
@@ -755,7 +848,7 @@ impl ClientConnection {
 
             UsbEvent::QueuePositionChanged {
                 device_id,
-                handle,
+                handle: _,
                 client_id,
                 new_position,
             } => {
@@ -793,19 +886,14 @@ impl ClientConnection {
                         client_id, device_id, handle
                     );
 
-                    // Notify client that their lock has expired
-                    if let Err(e) = self
-                        .send_push_notification(MessagePayload::DeviceStatusChangedNotification {
-                            device_id,
-                            device_info: None,
-                            reason: protocol::DeviceStatusChangeReason::SharingStatusChanged {
-                                shared: true,
-                            },
-                        })
-                        .await
-                    {
-                        warn!("Failed to send lock expired notification: {:#}", e);
-                    }
+                    // Queue as status change notification through aggregator
+                    self.queue_device_notification(PendingNotification::StatusChanged {
+                        device_id,
+                        device_info: None,
+                        reason: protocol::DeviceStatusChangeReason::SharingStatusChanged {
+                            shared: true,
+                        },
+                    });
                 }
             }
         }

@@ -146,11 +146,6 @@ impl VirtualUsbManager {
         self.inner.detach_device(global_id).await
     }
 
-    /// List all attached virtual devices
-    pub async fn list_devices(&self) -> Vec<GlobalDeviceId> {
-        self.inner.list_devices().await
-    }
-
     /// Detach all devices from a specific server
     ///
     /// Used when a server connection is lost or intentionally closed.

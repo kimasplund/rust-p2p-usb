@@ -44,7 +44,7 @@ use crate::network::ConnectionState;
 use crate::network::IrohClient;
 use crate::virtual_usb::{GlobalDeviceId, VirtualUsbManager};
 
-pub use app::{App, AppAction, DeviceStatus, ServerStatus, Toast, ToastType};
+pub use app::{App, AppAction, DeviceStatus, ServerStatus};
 pub use events::EventHandler;
 
 /// Messages sent from async tasks to the TUI
@@ -108,10 +108,10 @@ impl TuiRunner {
         // Create application state
         let mut app = App::new(client.endpoint_id());
 
-        // Add pre-configured servers
-        for server_str in &config.servers.approved_servers {
-            if let Ok(server_id) = server_str.parse::<EndpointId>() {
-                app.add_server(server_id, None);
+        // Add all servers (both legacy approved_servers and configured servers)
+        for server in config.all_servers() {
+            if let Ok(server_id) = server.node_id.parse::<EndpointId>() {
+                app.add_server(server_id, server.name.clone());
             }
         }
 
@@ -190,7 +190,16 @@ impl TuiRunner {
                     self.handle_action(action).await?;
                 }
                 // Periodic health metrics update (inline to avoid async borrowing issues)
+                // Use get_health_metrics for the selected server for faster updates,
+                // while the background task updates all servers less frequently
                 _ = health_interval.tick() => {
+                    // First, update the selected server's health (more responsive UI)
+                    if let Some(selected_id) = self.app.selected_server_id() {
+                        if let Some(health) = self.client.get_health_metrics(selected_id).await {
+                            self.app.update_server_health(&selected_id, health);
+                        }
+                    }
+                    // Also update all connected servers for consistency
                     let metrics = self.client.get_all_health_metrics().await;
                     for (endpoint_id, health) in metrics {
                         self.app.update_server_health(&endpoint_id, health);
@@ -351,19 +360,35 @@ impl TuiRunner {
                 self.spawn_detach_device(endpoint_id, handle);
             }
             AppAction::RefreshDevices(endpoint_id) => {
-                self.app.set_status("Refreshing device list...".to_string());
+                // Check connection health before refreshing
+                if !self.client.is_server_healthy(endpoint_id).await {
+                    self.app.set_status("Connection unhealthy, refresh may fail...".to_string());
+                    self.app.add_toast(
+                        "Warning: Connection to server is unhealthy".to_string(),
+                        app::ToastType::Warning,
+                    );
+                } else {
+                    self.app.set_status("Refreshing device list...".to_string());
+                }
                 self.spawn_refresh_devices(endpoint_id);
             }
-            AppAction::AddServer(server_str) => match server_str.parse::<EndpointId>() {
-                Ok(endpoint_id) => {
-                    self.app.add_server(endpoint_id, None);
-                    self.app
-                        .set_status(format!("Added server {}", truncate_id(&endpoint_id)));
+            AppAction::AddServer(server_str) => {
+                // Try to parse as connection URL first (p2p-usb://connect/<endpoint_id>)
+                let endpoint_str = qr::parse_connection_url(&server_str)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| server_str.clone());
+
+                match endpoint_str.parse::<EndpointId>() {
+                    Ok(endpoint_id) => {
+                        self.app.add_server(endpoint_id, None);
+                        self.app
+                            .set_status(format!("Added server {}", truncate_id(&endpoint_id)));
+                    }
+                    Err(e) => {
+                        self.app.set_status(format!("Invalid EndpointId: {}", e));
+                    }
                 }
-                Err(e) => {
-                    self.app.set_status(format!("Invalid EndpointId: {}", e));
-                }
-            },
+            }
             AppAction::ConnectionStateChanged(endpoint_id, state) => match state {
                 ConnectionState::Connected => {
                     self.app
@@ -429,9 +454,27 @@ impl TuiRunner {
     /// Spawn async task to disconnect from server
     fn spawn_disconnect_server(&self, endpoint_id: EndpointId) {
         let client = self.client.clone();
+        let virtual_usb = self.virtual_usb.clone();
         let tx = self.message_tx.clone();
 
         tokio::spawn(async move {
+            // First, detach all virtual USB devices from this server
+            match virtual_usb.detach_all_from_server(endpoint_id).await {
+                Ok(detached) => {
+                    if !detached.is_empty() {
+                        info!(
+                            "Detached {} virtual devices from server {}",
+                            detached.len(),
+                            truncate_id(&endpoint_id)
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!("Error detaching devices during disconnect: {}", e);
+                }
+            }
+
+            // Then disconnect from the network
             match client.disconnect_from_server(endpoint_id).await {
                 Ok(()) => {
                     let _ = tx.send(TuiMessage::ServerDisconnected(endpoint_id)).await;
@@ -619,9 +662,9 @@ pub async fn run(
     // Run the TUI
     let result = runner.run().await;
 
-    // Cleanup: detach all virtual USB devices
+    // Cleanup: detach all virtual USB devices across all servers
     info!("Cleaning up virtual USB devices...");
-    let attached_devices = virtual_usb.list_devices().await;
+    let attached_devices = virtual_usb.get_all_attached_devices().await;
     for global_id in attached_devices {
         if let Err(e) = virtual_usb.detach_device(global_id).await {
             warn!("Failed to detach device {}: {}", global_id, e);

@@ -20,6 +20,10 @@ pub fn generate_connection_url(endpoint_id: &EndpointId) -> String {
 ///
 /// Returns Some(endpoint_id_string) if the URL matches the expected format,
 /// None otherwise.
+///
+/// Note: This function is primarily intended for client-side QR code parsing.
+/// It's included in the server crate for completeness and testing.
+#[cfg(test)]
 pub fn parse_connection_url(url: &str) -> Option<&str> {
     url.strip_prefix(URL_SCHEME)
 }

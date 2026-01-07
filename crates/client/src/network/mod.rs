@@ -14,6 +14,6 @@ pub use client::{
 };
 pub use connection::DeviceNotification;
 pub use health::{
-    ConnectionQuality, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, HealthMetrics, HealthMonitor,
-    HealthState, create_health_monitor,
+    ConnectionQuality, HealthMetrics,
+    HealthState,
 };

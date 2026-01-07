@@ -126,6 +126,41 @@ async fn main() -> Result<()> {
     // Set up reconciliation callback for handling reconnection
     setup_reconciliation_callback(&client, virtual_usb.clone()).await;
 
+    // Auto-connect to servers configured with auto-connect mode
+    // (only if not using --connect flag, which takes precedence)
+    if args.connect.is_none() {
+        let auto_connect_servers = config.auto_connect_servers();
+        if !auto_connect_servers.is_empty() {
+            info!(
+                "Auto-connecting to {} server(s)...",
+                auto_connect_servers.len()
+            );
+            for server_config in auto_connect_servers {
+                match server_config.node_id.parse::<EndpointId>() {
+                    Ok(server_id) => {
+                        let display_name = config.server_display_name(&server_config.node_id);
+                        info!("Auto-connecting to server: {} ({})", display_name, server_id);
+                        match client.connect_to_server(server_id, None).await {
+                            Ok(()) => {
+                                info!("Auto-connected to {}", display_name);
+                            }
+                            Err(e) => {
+                                warn!("Failed to auto-connect to {}: {:#}", display_name, e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Invalid node_id for server '{}': {}",
+                            server_config.name.as_deref().unwrap_or("unnamed"),
+                            e
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // Handle specific connection request or run TUI
     let result = if let Some(server_id_str) = args.connect {
         connect_and_run(
@@ -146,16 +181,16 @@ async fn main() -> Result<()> {
 
 /// Create Iroh client with configuration
 async fn create_iroh_client(config: &config::ClientConfig) -> Result<IrohClient> {
-    // Parse approved servers from config
+    // Parse all servers (both legacy approved_servers and configured servers)
     let mut allowed_servers = std::collections::HashSet::new();
-    for server_str in &config.servers.approved_servers {
-        if !server_str.is_empty() {
-            match server_str.parse::<EndpointId>() {
+    for server in config.all_servers() {
+        if !server.node_id.is_empty() {
+            match server.node_id.parse::<EndpointId>() {
                 Ok(endpoint_id) => {
                     allowed_servers.insert(endpoint_id);
                 }
                 Err(e) => {
-                    warn!("Failed to parse server EndpointId '{}': {}", server_str, e);
+                    warn!("Failed to parse server EndpointId '{}': {}", server.node_id, e);
                 }
             }
         }
@@ -367,9 +402,9 @@ async fn connect_and_run(
         }
     }
 
-    // Cleanup: detach all virtual USB devices
+    // Cleanup: detach all virtual USB devices across all servers
     info!("Detaching virtual USB devices...");
-    let attached_devices = virtual_usb.list_devices().await;
+    let attached_devices = virtual_usb.get_all_attached_devices().await;
     for global_id in attached_devices {
         if let Err(e) = virtual_usb.detach_device(global_id).await {
             warn!("Failed to detach device {}: {:#}", global_id, e);
@@ -554,7 +589,14 @@ async fn reconcile_devices(
     // Build set of device IDs currently on server
     let server_device_ids: HashSet<DeviceId> = server_devices.iter().map(|d| d.id).collect();
 
-    // Get locally attached devices for this server
+    // Get locally attached device IDs for quick comparison
+    let local_device_ids = virtual_usb.get_attached_device_ids(server_id).await;
+    debug!(
+        "Local device IDs: {:?}, Server device IDs: {:?}",
+        local_device_ids, server_device_ids
+    );
+
+    // Get full device info for detachment (includes GlobalDeviceId)
     let local_device_info = virtual_usb.get_attached_device_info(server_id).await;
 
     debug!(

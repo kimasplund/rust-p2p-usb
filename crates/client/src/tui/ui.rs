@@ -203,16 +203,16 @@ fn render_server_list(frame: &mut Frame, app: &App, area: Rect) {
                         .map(|rtt| format!("{}ms", rtt))
                         .unwrap_or_else(|| "-".to_string());
 
-                    // Show degraded state warning
-                    let state_warning = if health.state == HealthState::Degraded {
-                        "!"
+                    // Show degraded state warning with appropriate color
+                    let (state_warning, display_color) = if health.state == HealthState::Degraded {
+                        ("!", colors::HEALTH_DEGRADED)
                     } else {
-                        ""
+                        ("", quality_color)
                     };
 
                     Some((
                         format!(" [{}{}|{}]", quality_icon, state_warning, rtt_str),
-                        quality_color,
+                        display_color,
                     ))
                 } else {
                     None
@@ -285,10 +285,24 @@ fn render_device_list(frame: &mut Frame, app: &App, area: Rect) {
         colors::INACTIVE_BORDER
     };
 
-    let title = if is_active {
+    // Show changed indicator if device list was recently modified
+    let title = if app.device_list_changed {
+        if is_active {
+            " Devices (active) * "
+        } else {
+            " Devices * "
+        }
+    } else if is_active {
         " Devices (active) "
     } else {
         " Devices "
+    };
+
+    // Use changed indicator color for border when device list changed
+    let border_color = if app.device_list_changed {
+        colors::CHANGED_INDICATOR
+    } else {
+        border_color
     };
 
     // Check if we have a selected server and its status
@@ -415,10 +429,10 @@ fn render_device_list(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Render the metrics panel
 fn render_metrics_panel(frame: &mut Frame, app: &App, area: Rect) {
-    use common::MetricsSnapshot;
+    
 
     // Get metrics for the selected server or aggregated metrics
-    let (title, metrics) = if let Some(server_metrics) = app.selected_server_metrics() {
+    let (_title, metrics) = if let Some(server_metrics) = app.selected_server_metrics() {
         let server_name = app
             .selected_server()
             .and_then(|s| s.name.clone())
@@ -590,7 +604,7 @@ fn render_metrics_panel(frame: &mut Frame, app: &App, area: Rect) {
     );
     frame.render_widget(throughput_block, chunks[2]);
 
-    // Connection quality
+    // Connection quality with health metrics details
     let quality = metrics.connection_quality();
     let quality_label = metrics.connection_quality_label();
     let quality_color = match quality {
@@ -601,31 +615,45 @@ fn render_metrics_panel(frame: &mut Frame, app: &App, area: Rect) {
         _ => colors::QUALITY_POOR,
     };
 
-    // Create a simple bar graph for quality
-    let bar_filled = (quality as usize * 10) / 100;
-    let bar_empty = 10 - bar_filled;
-    let quality_bar = format!("[{}{}]", "=".repeat(bar_filled), " ".repeat(bar_empty));
-
-    let uptime_str = metrics.format_uptime();
+    // Get health metrics from selected server for detailed RTT display
+    let health = app.selected_server().and_then(|s| s.health.clone());
+    let (rtt_detail, heartbeat_info) = if let Some(ref h) = health {
+        let latest = h
+            .latest_rtt_ms
+            .map(|v| format!("{}ms", v))
+            .unwrap_or("-".into());
+        let min = h
+            .min_rtt_ms
+            .map(|v| format!("{}ms", v))
+            .unwrap_or("-".into());
+        let max = h
+            .max_rtt_ms
+            .map(|v| format!("{}ms", v))
+            .unwrap_or("-".into());
+        (
+            format!("{}/{}/{}", min, latest, max),
+            format!("{}/{}", h.heartbeats_received, h.heartbeats_sent),
+        )
+    } else {
+        ("-/-/-".into(), "-/-".into())
+    };
 
     let quality_lines = vec![
         Line::from(vec![
             Span::styled("Quality: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(quality_label, Style::default().fg(quality_color)),
+            Span::styled(format!("{} ({}%)", quality_label, quality), Style::default().fg(quality_color)),
         ]),
-        Line::from(vec![Span::styled(
-            format!("{}%", quality),
-            Style::default()
-                .fg(quality_color)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(vec![Span::styled(
-            quality_bar,
-            Style::default().fg(quality_color),
-        )]),
+        Line::from(vec![
+            Span::styled("RTT m/c/M: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(rtt_detail, Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(vec![
+            Span::styled("Heartbeats: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(heartbeat_info, Style::default().fg(Color::Green)),
+        ]),
         Line::from(vec![
             Span::styled("Uptime: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(uptime_str, Style::default().fg(Color::White)),
+            Span::styled(metrics.format_uptime(), Style::default().fg(Color::White)),
         ]),
     ];
 

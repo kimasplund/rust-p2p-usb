@@ -96,6 +96,15 @@ pub enum NetworkEvent {
     ClientAttachedDevice { endpoint_id: String, device_id: u32 },
     /// Client detached from a device
     ClientDetachedDevice { endpoint_id: String, device_id: u32 },
+    /// Transfer completed (for metrics tracking)
+    TransferCompleted {
+        endpoint_id: String,
+        device_id: u32,
+        bytes_sent: u64,
+        bytes_received: u64,
+        success: bool,
+        latency_us: u64,
+    },
 }
 
 impl App {
@@ -210,6 +219,11 @@ impl App {
     /// Get the selected index
     pub fn selected_index(&self) -> usize {
         self.selected_index
+    }
+
+    /// Get the selected device ID
+    pub fn selected_device_id(&self) -> Option<u32> {
+        self.device_order.get(self.selected_index).copied()
     }
 
     /// Get the current dialog
@@ -435,12 +449,17 @@ impl App {
             NetworkEvent::ClientConnected { endpoint_id } => {
                 self.connection_count += 1;
                 info!("Client connected: {}", endpoint_id);
+                let metrics = self.get_or_create_client_metrics(&endpoint_id);
+                metrics.mark_connected();
             }
             NetworkEvent::ClientDisconnected { endpoint_id } => {
                 if self.connection_count > 0 {
                     self.connection_count -= 1;
                 }
                 info!("Client disconnected: {}", endpoint_id);
+                if let Some(metrics) = self.client_metrics.get(&endpoint_id) {
+                    metrics.mark_disconnected();
+                }
                 // Remove client from all devices
                 for device in self.devices.values_mut() {
                     device.clients.remove(&endpoint_id);
@@ -454,6 +473,7 @@ impl App {
                     device.clients.insert(endpoint_id.clone());
                     info!("Client {} attached to device {}", endpoint_id, device_id);
                 }
+                let _ = self.get_or_create_device_metrics(device_id);
             }
             NetworkEvent::ClientDetachedDevice {
                 endpoint_id,
@@ -463,6 +483,28 @@ impl App {
                     device.clients.remove(&endpoint_id);
                     info!("Client {} detached from device {}", endpoint_id, device_id);
                 }
+            }
+            NetworkEvent::TransferCompleted {
+                endpoint_id,
+                device_id,
+                bytes_sent,
+                bytes_received,
+                success,
+                latency_us,
+            } => {
+                let latency = std::time::Duration::from_micros(latency_us);
+
+                // Record to total metrics tracker
+                let total_tracker = self.total_metrics_tracker();
+                total_tracker.record_transfer(bytes_sent, bytes_received, latency, success);
+
+                // Record to client metrics
+                let client_metrics = self.get_or_create_client_metrics(&endpoint_id);
+                client_metrics.record_transfer(bytes_sent, bytes_received, latency, success);
+
+                // Record to device metrics
+                let device_metrics = self.get_or_create_device_metrics(device_id);
+                device_metrics.record_transfer(bytes_sent, bytes_received, latency, success);
             }
         }
     }

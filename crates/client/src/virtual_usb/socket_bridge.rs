@@ -33,7 +33,8 @@
 
 use super::usbip_protocol::{
     UsbIpCmdSubmit, UsbIpCmdUnlink, UsbIpCommand, UsbIpHeader, UsbIpIsoPacketDescriptor,
-    UsbIpMessage, UsbIpRetSubmit, UsbIpRetUnlink, usb_response_to_usbip_full, usbip_to_usb_request,
+    UsbIpMessage, UsbIpRetSubmit, UsbIpRetUnlink, optimal_urb_buffer_size,
+    usb_response_to_usbip, usb_response_to_usbip_full, usbip_to_usb_request,
 };
 use crate::network::device_proxy::DeviceProxy;
 use anyhow::{Context, Result, anyhow};
@@ -66,6 +67,8 @@ pub struct SocketBridge {
     /// Pending transfers tracker for CMD_UNLINK cancellation support
     /// Maps seqnum -> cancellation sender (sending () triggers cancellation)
     pending_transfers: Arc<RwLock<HashMap<u32, oneshot::Sender<()>>>>,
+    /// Optimal URB buffer size based on device speed
+    optimal_buffer_size: usize,
 }
 
 impl SocketBridge {
@@ -103,6 +106,11 @@ impl SocketBridge {
 
         // 4. Keep BOTH socketpair ends alive for ongoing communication
         // vhci_stream is stored to prevent socketpair from closing when kernel closes its dup'd FD
+
+        // Calculate optimal buffer size based on device speed for efficient memory allocation
+        let device_speed = device_proxy.device_info().speed;
+        let buffer_size = optimal_urb_buffer_size(device_speed);
+
         let bridge = Self {
             device_proxy,
             socket: Arc::new(std::sync::Mutex::new(bridge_stream)),
@@ -111,11 +119,12 @@ impl SocketBridge {
             port,
             running: Arc::new(AtomicBool::new(true)),
             pending_transfers: Arc::new(RwLock::new(HashMap::new())),
+            optimal_buffer_size: buffer_size,
         };
 
         debug!(
-            "Created Unix socketpair bridge: devid={}, port={}, vhci_fd={} (ready for CMD_SUBMIT)",
-            devid, port, vhci_fd
+            "Created Unix socketpair bridge: devid={}, port={}, vhci_fd={}, optimal_buffer_size={} (ready for CMD_SUBMIT)",
+            devid, port, vhci_fd, buffer_size
         );
 
         Ok((bridge, vhci_fd))
@@ -185,8 +194,8 @@ impl SocketBridge {
         );
 
         info!(
-            "Socket bridge ready for device {} on port {}, entering main loop",
-            self.devid, self.port
+            "Socket bridge ready for device {} on port {} (buffer_size={}), entering main loop",
+            self.devid, self.port, self.optimal_buffer_size
         );
 
         // Enter the main loop for CMD_SUBMIT/RET_SUBMIT
@@ -434,8 +443,21 @@ impl SocketBridge {
         // Handle transfer result
         let usb_response = result.context("Failed to submit transfer to device proxy")?;
 
-        // Convert response back to USB/IP (with full ISO support)
-        let mut converted = usb_response_to_usbip_full(&usb_response);
+        // Convert response back to USB/IP
+        // For non-isochronous transfers (number_of_packets == 0), use the simpler converter
+        // For isochronous, use the full converter that handles ISO packet descriptors
+        let is_isochronous = cmd.number_of_packets > 0;
+        let mut converted = if is_isochronous {
+            usb_response_to_usbip_full(&usb_response)
+        } else {
+            // Use simpler conversion for control/bulk/interrupt transfers
+            let (ret, data) = usb_response_to_usbip(&usb_response);
+            super::usbip_protocol::UsbIpConvertedResponse {
+                ret,
+                data,
+                iso_packets: Vec::new(),
+            }
+        };
 
         // IMPORTANT: Clamp response data to the kernel's requested buffer size
         // The kernel allocates exactly transfer_buffer_length bytes for IN transfers.
@@ -498,7 +520,8 @@ impl SocketBridge {
         );
         header.direction = request_header.direction;
         header.ep = request_header.ep;
-        let mut header_buf = Vec::new();
+        // Pre-allocate with UsbIpHeader::SIZE capacity for efficient writes
+        let mut header_buf = Vec::with_capacity(UsbIpHeader::SIZE);
         header.write_to(&mut header_buf)?;
 
         eprintln!(
@@ -522,8 +545,8 @@ impl SocketBridge {
 
         socket.write_all(&header_buf)?;
 
-        // Write RET_SUBMIT payload
-        let mut ret_buf = Vec::new();
+        // Write RET_SUBMIT payload - pre-allocate with exact size
+        let mut ret_buf = Vec::with_capacity(UsbIpRetSubmit::SIZE);
         ret.write_to(&mut ret_buf)?;
 
         debug!(
@@ -546,7 +569,7 @@ impl SocketBridge {
 
         // Write ISO packet descriptors if this is an isochronous transfer
         // Per USB/IP protocol, ISO descriptors come after the header but before data
-        let mut iso_buf = Vec::new();
+        let mut iso_buf = Vec::with_capacity(iso_packets.len() * UsbIpIsoPacketDescriptor::SIZE);
         for iso_packet in &iso_packets {
             iso_packet.write_to(&mut iso_buf)?;
         }
@@ -667,9 +690,9 @@ impl SocketBridge {
             .lock()
             .map_err(|e| anyhow!("Failed to lock socket: {}", e))?;
 
-        // Write header (20 bytes)
+        // Write header (20 bytes) - pre-allocate with exact size
         let header = UsbIpHeader::new(UsbIpCommand::RetUnlink, seqnum, self.devid);
-        let mut header_buf = Vec::new();
+        let mut header_buf = Vec::with_capacity(UsbIpHeader::SIZE);
         header.write_to(&mut header_buf)?;
 
         debug!(
@@ -679,9 +702,9 @@ impl SocketBridge {
 
         socket.write_all(&header_buf)?;
 
-        // Write RET_UNLINK payload using the proper struct
+        // Write RET_UNLINK payload using the proper struct - pre-allocate with exact size
         let ret_unlink = UsbIpRetUnlink { status };
-        let mut ret_buf = Vec::new();
+        let mut ret_buf = Vec::with_capacity(UsbIpRetUnlink::SIZE);
         ret_unlink.write_to(&mut ret_buf)?;
 
         debug!(
@@ -714,3 +737,11 @@ impl Drop for SocketBridge {
         debug!("Socket bridge dropped for port {}", self.port);
     }
 }
+
+// Protocol structure size validations
+// These compile-time assertions verify our SIZE constants match expected values
+const _: () = assert!(UsbIpCmdUnlink::SIZE == 4, "CMD_UNLINK payload must be 4 bytes");
+const _: () = assert!(
+    UsbIpIsoPacketDescriptor::SIZE == 16,
+    "ISO packet descriptor must be 16 bytes"
+);

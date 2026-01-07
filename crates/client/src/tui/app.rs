@@ -261,7 +261,41 @@ impl App {
     }
 
     /// Update health metrics for a server
+    ///
+    /// Shows an error toast when connection health degrades to Poor quality
+    /// or enters a Degraded state.
     pub fn update_server_health(&mut self, endpoint_id: &EndpointId, health: HealthMetrics) {
+        // First, check if we need to show a toast (read-only access)
+        let should_show_toast = if let Some(server) = self.servers.get(endpoint_id) {
+            let was_degraded = server
+                .health
+                .as_ref()
+                .is_some_and(|h| h.state == HealthState::Degraded || h.quality == ConnectionQuality::Poor);
+            let is_degraded = health.state == HealthState::Degraded || health.quality == ConnectionQuality::Poor;
+
+            if is_degraded && !was_degraded {
+                Some(
+                    server
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| format!("{}", endpoint_id).chars().take(16).collect()),
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Show error toast if newly degraded
+        if let Some(server_name) = should_show_toast {
+            self.add_toast(
+                format!("Connection degraded: {}", server_name),
+                ToastType::Error,
+            );
+        }
+
+        // Now update the health metrics
         if let Some(server) = self.servers.get_mut(endpoint_id) {
             server.health = Some(health);
         }

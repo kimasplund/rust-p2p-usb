@@ -19,7 +19,9 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, interval_at, sleep};
 use tracing::{debug, error, info, warn};
 
-use super::health::{HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, HealthMetrics, HealthMonitor};
+use super::health::{
+    HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, HealthMetrics, HealthMonitor, create_health_monitor,
+};
 
 /// Device notification received from server via push
 #[derive(Debug, Clone)]
@@ -92,7 +94,7 @@ impl ServerConnection {
         let next_request_id = Arc::new(AtomicU64::new(1));
         let shutdown = Arc::new(AtomicBool::new(false));
         let (notification_tx, _) = broadcast::channel(64);
-        let health_monitor = Arc::new(HealthMonitor::new());
+        let health_monitor = create_health_monitor();
 
         let conn = Self {
             server_id,

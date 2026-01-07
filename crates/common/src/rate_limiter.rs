@@ -304,22 +304,73 @@ impl RateLimiter {
     ///
     /// Returns true if allowed, false if rate limited.
     /// Unlike `check`, this actually consumes the tokens if allowed.
+    /// Uses try_consume for atomic check-and-consume on each bucket.
     pub async fn try_acquire(
         &self,
         client_id: Option<&str>,
         device_id: Option<u32>,
         bytes: u64,
     ) -> bool {
-        // First check if allowed
-        let result = self.check(client_id, device_id, bytes).await;
-
-        if result.is_allowed() {
-            // Consume tokens
-            self.record(client_id, device_id, bytes).await;
-            true
-        } else {
-            false
+        // Try to consume from global bucket first
+        if let Some(ref global) = self.global_bucket {
+            let mut bucket = global.lock().await;
+            if !bucket.try_consume(bytes) {
+                return false;
+            }
         }
+
+        // Try to consume from client bucket
+        if let Some(client_id) = client_id {
+            if let Some(limit) = &self.default_client_limit {
+                let mut buckets = self.client_buckets.lock().await;
+                let bucket = buckets
+                    .entry(client_id.to_string())
+                    .or_insert_with(|| TokenBucket::new(limit));
+                if !bucket.try_consume(bytes) {
+                    // Refund global bucket since we failed at client level
+                    if let Some(ref global) = self.global_bucket {
+                        let mut global_bucket = global.lock().await;
+                        global_bucket.refill();
+                        // Add back tokens (bounded by max)
+                        global_bucket.tokens =
+                            (global_bucket.tokens + bytes as f64).min(global_bucket.max_tokens);
+                    }
+                    return false;
+                }
+            }
+        }
+
+        // Try to consume from device bucket
+        if let Some(device_id) = device_id {
+            if let Some(limit) = &self.default_device_limit {
+                let mut buckets = self.device_buckets.lock().await;
+                let bucket = buckets
+                    .entry(device_id)
+                    .or_insert_with(|| TokenBucket::new(limit));
+                if !bucket.try_consume(bytes) {
+                    // Refund global and client buckets since we failed at device level
+                    if let Some(ref global) = self.global_bucket {
+                        let mut global_bucket = global.lock().await;
+                        global_bucket.refill();
+                        global_bucket.tokens =
+                            (global_bucket.tokens + bytes as f64).min(global_bucket.max_tokens);
+                    }
+                    if let Some(client_id) = client_id {
+                        if self.default_client_limit.is_some() {
+                            let mut client_buckets = self.client_buckets.lock().await;
+                            if let Some(bucket) = client_buckets.get_mut(client_id) {
+                                bucket.refill();
+                                bucket.tokens =
+                                    (bucket.tokens + bytes as f64).min(bucket.max_tokens);
+                            }
+                        }
+                    }
+                    return false;
+                }
+            }
+        }
+
+        true
     }
 
     /// Remove a client's bucket (call when client disconnects)

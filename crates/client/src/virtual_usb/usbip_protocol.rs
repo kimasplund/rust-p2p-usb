@@ -828,6 +828,63 @@ mod tests {
         // actual_length = 1048576 (0x00100000)
         assert_eq!(&buf[4..8], &[0x00, 0x10, 0x00, 0x00]);
     }
+
+    #[test]
+    fn test_usb_response_to_usbip_simple() {
+        // Test the simple response conversion helper
+        let response = protocol::UsbResponse {
+            id: protocol::RequestId(1),
+            result: protocol::TransferResult::Success {
+                data: vec![0x01, 0x02, 0x03, 0x04],
+            },
+        };
+
+        let (ret, data) = usb_response_to_usbip(&response);
+
+        assert_eq!(ret.status, 0);
+        assert_eq!(ret.actual_length, 4);
+        assert_eq!(data, vec![0x01, 0x02, 0x03, 0x04]);
+    }
+
+    #[test]
+    fn test_usb_response_to_usbip_error() {
+        // Test error response conversion
+        let response = protocol::UsbResponse {
+            id: protocol::RequestId(2),
+            result: protocol::TransferResult::Error {
+                error: protocol::UsbError::Pipe,
+            },
+        };
+
+        let (ret, data) = usb_response_to_usbip(&response);
+
+        // EPIPE = -32, representing stall/pipe error
+        assert_eq!(ret.status, -32);
+        assert_eq!(ret.actual_length, 0);
+        assert!(data.is_empty());
+    }
+
+    #[test]
+    fn test_iso_packet_descriptor_size() {
+        // Verify SIZE constant matches actual serialization
+        let desc = UsbIpIsoPacketDescriptor {
+            offset: 0,
+            length: 512,
+            actual_length: 512,
+            status: 0,
+        };
+
+        let mut buf = Vec::new();
+        desc.write_to(&mut buf).unwrap();
+
+        assert_eq!(buf.len(), UsbIpIsoPacketDescriptor::SIZE);
+    }
+
+    #[test]
+    fn test_cmd_unlink_size() {
+        // Verify SIZE constant is correct (4 bytes for seqnum)
+        assert_eq!(UsbIpCmdUnlink::SIZE, 4);
+    }
 }
 
 /// OP_REQ_IMPORT message (40 bytes)

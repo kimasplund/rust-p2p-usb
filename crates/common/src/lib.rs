@@ -20,7 +20,7 @@ pub use channel::{UsbBridge, UsbCommand, UsbEvent, UsbWorker, create_usb_bridge}
 pub use error::{Error, Result};
 pub use keys::{default_secret_key_path, load_or_generate_secret_key};
 pub use logging::setup_logging;
-pub use metrics::{LatencyStats, MetricsSnapshot, TransferMetrics};
+pub use metrics::{LatencyStats, MetricsSnapshot, SAMPLE_INTERVAL_MS, TransferMetrics, rolling_window_duration};
 pub use rate_limiter::{
     BandwidthLimit, BandwidthMetrics, MetricsTracker, RateLimitResult, RateLimiter,
     SharedRateLimiter,

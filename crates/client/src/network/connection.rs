@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock, broadcast};
 use tokio::task::JoinHandle;
-use tokio::time::{interval, sleep};
+use tokio::time::{interval_at, sleep, Instant};
 use tracing::{debug, error, info, warn};
 
 /// Device notification received from server via push
@@ -316,7 +316,11 @@ impl ServerConnection {
 
     /// Heartbeat loop - sends Ping every 30 seconds
     async fn heartbeat_loop(&self) {
-        let mut ticker = interval(Duration::from_secs(30));
+        // Delay first tick to allow capability exchange to complete first
+        let mut ticker = interval_at(
+            Instant::now() + Duration::from_secs(30),
+            Duration::from_secs(30),
+        );
 
         loop {
             ticker.tick().await;

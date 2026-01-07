@@ -207,12 +207,9 @@ impl App {
                         }
                     }
                     Dialog::ConfirmReset => {
-                        // Enter in ConfirmReset dialog means confirm
-                        // Note: actual reset logic is handled in the main loop when seeing Action::ViewDetails
-                        // combined with state check, OR we handle it here by special return?
-                        // The issue is handle_action is &mut self -> ().
-                        // We need a way to signal "RESET CONFIRMED" to the async runner.
-                        // Let's use a flag.
+                        // Enter in ConfirmReset dialog confirms the reset
+                        self.dialog = Dialog::None;
+                        self.pending_reset = true;
                     }
                     _ => {}
                 }

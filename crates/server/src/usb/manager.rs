@@ -219,8 +219,8 @@ impl DeviceManager {
         if let Some(device_id) = self.remove_device(bus, address)
             && let Err(e) = self.event_sender.send_blocking(UsbEvent::DeviceLeft {
                 device_id,
-                invalidated_handles: Vec::new(), // TODO: Phase 3 will populate this
-                affected_clients: Vec::new(),    // TODO: Phase 3 will populate this
+                invalidated_handles: Vec::new(), // Handled by ClientConnection locally
+                affected_clients: Vec::new(),    // Handled by ClientConnection locally
             })
         {
             error!("Failed to send DeviceLeft event: {}", e);

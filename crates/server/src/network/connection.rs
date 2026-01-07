@@ -8,11 +8,11 @@ use common::UsbBridge;
 use common::{UsbCommand, UsbEvent};
 use iroh::PublicKey as EndpointId;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
+
 use protocol::{
     CURRENT_VERSION, DeviceHandle, DeviceId, Message, MessagePayload, UsbRequest, decode_framed,
     encode_framed, validate_version,
 };
-use protocol::types::DeviceRemovalReason;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::time;
@@ -60,21 +60,31 @@ impl ClientConnection {
     /// Exchange capabilities with client
     async fn exchange_capabilities(&mut self) -> Result<()> {
         // Wait for client capabilities on a bidirectional stream
-        let (mut send, mut recv) = tokio::time::timeout(
-            Duration::from_secs(10),
-            self.connection.accept_bi()
-        ).await.context("Timeout waiting for capability exchange")?
-            .context("Failed to accept capability exchange stream")?;
+        let (mut send, mut recv) =
+            tokio::time::timeout(Duration::from_secs(10), self.connection.accept_bi())
+                .await
+                .context("Timeout waiting for capability exchange")?
+                .context("Failed to accept capability exchange stream")?;
 
-        let message_bytes = protocol::read_framed_async(&mut recv).await
+        let message_bytes = protocol::read_framed_async(&mut recv)
+            .await
             .context("Failed to read client capabilities")?;
         let message: Message = decode_framed(&message_bytes)?;
 
-        if let MessagePayload::ClientCapabilities { supports_push_notifications } = message.payload {
+        if let MessagePayload::ClientCapabilities {
+            supports_push_notifications,
+        } = message.payload
+        {
             self.client_supports_push = supports_push_notifications;
-            info!("Client capabilities: push_notifications={}", supports_push_notifications);
+            info!(
+                "Client capabilities: push_notifications={}",
+                supports_push_notifications
+            );
         } else {
-            return Err(anyhow!("Expected ClientCapabilities, got {:?}", message.payload));
+            return Err(anyhow!(
+                "Expected ClientCapabilities, got {:?}",
+                message.payload
+            ));
         }
 
         // Send server capabilities
@@ -86,7 +96,8 @@ impl ClientConnection {
         };
         let response_bytes = encode_framed(&response)?;
         protocol::write_framed_async(&mut send, &response_bytes).await?;
-        send.finish().context("Failed to finish capability response")?;
+        send.finish()
+            .context("Failed to finish capability response")?;
 
         Ok(())
     }
@@ -100,7 +111,10 @@ impl ClientConnection {
 
         // Exchange capabilities with client
         if let Err(e) = self.exchange_capabilities().await {
-            warn!("Capability exchange failed: {:#}, continuing without push notifications", e);
+            warn!(
+                "Capability exchange failed: {:#}, continuing without push notifications",
+                e
+            );
         }
 
         // Spawn keep-alive task
@@ -352,7 +366,10 @@ impl ClientConnection {
         }
 
         // Open unidirectional stream (server -> client)
-        let mut send = self.connection.open_uni().await
+        let mut send = self
+            .connection
+            .open_uni()
+            .await
             .context("Failed to open unidirectional stream for notification")?;
 
         let message = Message {
@@ -362,7 +379,8 @@ impl ClientConnection {
 
         let framed = encode_framed(&message)?;
         protocol::write_framed_async(&mut send, &framed).await?;
-        send.finish().context("Failed to finish notification stream")?;
+        send.finish()
+            .context("Failed to finish notification stream")?;
 
         debug!("Push notification sent successfully");
         Ok(())
@@ -374,14 +392,19 @@ impl ClientConnection {
             UsbEvent::DeviceArrived { device } => {
                 debug!("Device arrived: {:?}", device.id);
                 // Send push notification to client
-                if let Err(e) = self.send_push_notification(
-                    MessagePayload::DeviceArrivedNotification { device }
-                ).await {
+                if let Err(e) = self
+                    .send_push_notification(MessagePayload::DeviceArrivedNotification { device })
+                    .await
+                {
                     warn!("Failed to send device arrived notification: {:#}", e);
                 }
             }
 
-            UsbEvent::DeviceLeft { device_id, invalidated_handles, affected_clients } => {
+            UsbEvent::DeviceLeft {
+                device_id,
+                invalidated_handles,
+                affected_clients,
+            } => {
                 info!(
                     "Device left: {:?}, invalidated_handles={:?}, affected_clients={:?}",
                     device_id, invalidated_handles, affected_clients
@@ -409,13 +432,14 @@ impl ClientConnection {
                 }
 
                 // Send push notification to client
-                if let Err(e) = self.send_push_notification(
-                    MessagePayload::DeviceRemovedNotification {
+                if let Err(e) = self
+                    .send_push_notification(MessagePayload::DeviceRemovedNotification {
                         device_id,
                         invalidated_handles,
-                        reason: DeviceRemovalReason::Unplugged,
-                    }
-                ).await {
+                        reason: protocol::DeviceRemovalReason::Unplugged,
+                    })
+                    .await
+                {
                     warn!("Failed to send device removed notification: {:#}", e);
                 }
             }

@@ -70,6 +70,7 @@ impl ReconnectionPolicy {
 ///
 /// Manages connections to multiple servers with allowlist enforcement
 /// and automatic reconnection logic.
+#[derive(Clone)]
 pub struct IrohClient {
     /// Iroh network endpoint
     endpoint: Endpoint,
@@ -80,6 +81,8 @@ pub struct IrohClient {
     connections: Arc<Mutex<HashMap<EndpointId, ServerConnection>>>,
     /// Connection state updates
     state_updates: broadcast::Sender<(EndpointId, ConnectionState)>,
+    /// Device notification updates (aggregated from all servers)
+    notification_updates: broadcast::Sender<(EndpointId, DeviceNotification)>,
     /// Target servers we want to maintain connections to
     target_servers: Arc<RwLock<HashSet<EndpointId>>>,
 }
@@ -147,6 +150,7 @@ impl IrohClient {
         );
 
         let (state_updates, _) = broadcast::channel(32);
+        let (notification_updates, _) = broadcast::channel(128); // Larger buffer for notifications
         let target_servers = Arc::new(RwLock::new(HashSet::new()));
 
         let client = Self {
@@ -154,6 +158,7 @@ impl IrohClient {
             allowed_servers: Arc::new(RwLock::new(config.allowed_servers)),
             connections: Arc::new(Mutex::new(HashMap::new())),
             state_updates,
+            notification_updates,
             target_servers,
         };
 
@@ -165,9 +170,9 @@ impl IrohClient {
 
     /// Start the background connection monitor
     fn start_monitor(&self) {
+        let client = self.clone();
         let connections = self.connections.clone();
         let target_servers = self.target_servers.clone();
-        let endpoint = self.endpoint.clone();
         let state_updates = self.state_updates.clone();
 
         tokio::spawn(async move {
@@ -209,7 +214,12 @@ impl IrohClient {
                         info!("Attempting reconnection to {}...", server_id);
 
                         // Try to connect
-                        match ServerConnection::new(endpoint.clone(), *server_id, None).await {
+                        // We need to use the client instance to access setup_connection
+                        // Since IrohClient expects &self for setup_connection, and we are in a task
+                        // We rely on the fact that we can call methods on the captured client clone if we had one.
+                        // But wait, setup_connection is an instance method.
+
+                        match client.setup_connection(*server_id, None).await {
                             Ok(conn) => {
                                 info!("Reconnected to {}!", server_id);
                                 {
@@ -246,6 +256,13 @@ impl IrohClient {
     /// Subscribe to connection state updates
     pub fn subscribe(&self) -> broadcast::Receiver<(EndpointId, ConnectionState)> {
         self.state_updates.subscribe()
+    }
+
+    /// Subscribe to all device notifications from all servers
+    pub fn subscribe_all_notifications(
+        &self,
+    ) -> broadcast::Receiver<(EndpointId, DeviceNotification)> {
+        self.notification_updates.subscribe()
     }
 
     /// Get the client's EndpointId
@@ -324,9 +341,11 @@ impl IrohClient {
 
         info!("Connecting to server: {}", server_id);
 
-        // Create connection
-        let connection =
-            ServerConnection::new(self.endpoint.clone(), server_id, server_addr).await?;
+        // Create connection and wire up notifications
+        let connection = self.setup_connection(server_id, server_addr).await?;
+
+        // Successfully connected
+        info!("Successfully connected to server: {}", server_id);
 
         // Store connection
         {
@@ -342,7 +361,6 @@ impl IrohClient {
             .state_updates
             .send((server_id, ConnectionState::Connected));
 
-        info!("Successfully connected to server: {}", server_id);
         Ok(())
     }
 
@@ -511,6 +529,31 @@ impl IrohClient {
 
         info!("Client shutdown complete");
         Ok(())
+    }
+
+    /// Internal helper to create a connection and wire up notifications
+    async fn setup_connection(
+        &self,
+        server_id: EndpointId,
+        server_addr: Option<EndpointAddr>,
+    ) -> Result<ServerConnection> {
+        let connection =
+            ServerConnection::new(self.endpoint.clone(), server_id, server_addr).await?;
+
+        // Setup notification forwarding
+        let notification_tx_agg = self.notification_updates.clone();
+        let mut notification_rx = connection.subscribe_notifications();
+
+        tokio::spawn(async move {
+            while let Ok(notification) = notification_rx.recv().await {
+                if notification_tx_agg.send((server_id, notification)).is_err() {
+                    break;
+                }
+            }
+            debug!("Notification forwarder for {} stopped", server_id);
+        });
+
+        Ok(connection)
     }
 }
 

@@ -138,12 +138,26 @@ impl TuiRunner {
 
         // Subscribe to connection state updates
         let mut state_rx = self.client.subscribe();
+        // Subscribe to device notifications
+        let mut notification_rx = self.client.subscribe_all_notifications();
 
         loop {
             tokio::select! {
                 // Handle connection state updates
                 Ok((endpoint_id, state)) = state_rx.recv() => {
                     self.handle_action(AppAction::ConnectionStateChanged(endpoint_id, state)).await?;
+                }
+                // Handle device notifications
+                Ok((endpoint_id, notification)) = notification_rx.recv() => {
+                    use crate::network::DeviceNotification;
+                    match notification {
+                        DeviceNotification::DeviceArrived { device } => {
+                             self.handle_action(AppAction::DeviceArrived(endpoint_id, device)).await?;
+                        }
+                        DeviceNotification::DeviceRemoved { device_id, .. } => {
+                             self.handle_action(AppAction::DeviceRemoved(endpoint_id, device_id)).await?;
+                        }
+                    }
                 }
                 // Process any pending messages from async tasks
                 Some(msg) = self.message_rx.recv() => {
@@ -253,6 +267,12 @@ impl TuiRunner {
             }
             AppAction::DisconnectServer(endpoint_id) => {
                 self.spawn_disconnect_server(endpoint_id);
+            }
+            AppAction::DeviceArrived(endpoint_id, device_info) => {
+                self.app.add_device(&endpoint_id, device_info);
+            }
+            AppAction::DeviceRemoved(endpoint_id, device_id) => {
+                self.app.remove_device(&endpoint_id, device_id);
             }
             AppAction::AttachDevice(endpoint_id, device_id) => {
                 self.app.update_device_status(

@@ -108,6 +108,10 @@ pub enum AppAction {
     AddServer(String),
     /// Connection state changed
     ConnectionStateChanged(EndpointId, ConnectionState),
+    /// Device arrived notification
+    DeviceArrived(EndpointId, DeviceInfo),
+    /// Device removed notification
+    DeviceRemoved(EndpointId, DeviceId),
 }
 
 /// Main application state
@@ -235,6 +239,33 @@ impl App {
 
         if let Some(server) = self.servers.get_mut(endpoint_id) {
             server.device_count = device_count;
+        }
+    }
+
+    /// Add a single device to the list
+    pub fn add_device(&mut self, endpoint_id: &EndpointId, device_info: DeviceInfo) {
+        let entry = self.devices.entry(*endpoint_id).or_default();
+        if !entry.iter().any(|d| d.info.id == device_info.id) {
+            entry.push(RemoteDevice {
+                info: device_info,
+                status: DeviceStatus::Available,
+                handle: None,
+                error: None,
+            });
+            if let Some(server) = self.servers.get_mut(endpoint_id) {
+                server.device_count = entry.len();
+            }
+        }
+    }
+
+    /// Remove a single device from the list
+    pub fn remove_device(&mut self, endpoint_id: &EndpointId, device_id: DeviceId) {
+        if let Some(devices) = self.devices.get_mut(endpoint_id) {
+            devices.retain(|d| d.info.id != device_id);
+            let count = devices.len();
+            if let Some(server) = self.servers.get_mut(endpoint_id) {
+                server.device_count = count;
+            }
         }
     }
 

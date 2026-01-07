@@ -241,6 +241,12 @@ async fn connect_and_run(
     let previously_attached: Arc<RwLock<HashSet<DeviceId>>> =
         Arc::new(RwLock::new(HashSet::new()));
 
+    // Get server config for auto-attach filtering
+    let server_config = config.find_server(&server_id.to_string());
+    let effective_mode = server_config
+        .map(|s| config.effective_auto_connect(s))
+        .unwrap_or(config::AutoConnectMode::Manual);
+
     // List available devices and attach them as virtual USB devices
     match client.list_remote_devices(server_id).await {
         Ok(devices) => {
@@ -249,17 +255,29 @@ async fn connect_and_run(
             } else {
                 info!("Available devices on server:");
                 for device in &devices {
+                    let product_name = device.product.as_deref();
+
+                    // Check if this device should be auto-attached
+                    let should_attach = server_config
+                        .map(|s| s.should_auto_attach(device.vendor_id, device.product_id, product_name))
+                        .unwrap_or(matches!(effective_mode, config::AutoConnectMode::AutoWithDevices));
+
+                    let status_prefix = if should_attach { "[auto]" } else { "[skip]" };
                     info!(
-                        "  [{}] {:04x}:{:04x} - {} {}",
-                        device.id.0,
+                        "  {} {:04x}:{:04x} - {} {}",
+                        status_prefix,
                         device.vendor_id,
                         device.product_id,
                         device
                             .manufacturer
                             .as_deref()
                             .unwrap_or("Unknown Manufacturer"),
-                        device.product.as_deref().unwrap_or("Unknown Product")
+                        product_name.unwrap_or("Unknown Product")
                     );
+
+                    if !should_attach {
+                        continue;
+                    }
 
                     // Create device proxy and attach as virtual USB device
                     match IrohClient::create_device_proxy(client.clone(), server_id, device.clone())
@@ -292,12 +310,14 @@ async fn connect_and_run(
         let virtual_usb_clone = virtual_usb.clone();
         let client_clone = client.clone();
         let previously_attached_clone = previously_attached.clone();
+        let server_config_clone = server_config.cloned();
         tokio::spawn(handle_notifications(
             notification_rx,
             virtual_usb_clone,
             client_clone,
             server_id,
             previously_attached_clone,
+            server_config_clone,
         ));
         info!("Subscribed to device notifications from server");
     } else {
@@ -360,6 +380,7 @@ async fn handle_notifications(
     client: Arc<IrohClient>,
     server_id: EndpointId,
     previously_attached: Arc<RwLock<HashSet<DeviceId>>>,
+    server_config: Option<config::ServerConfig>,
 ) {
     loop {
         match notification_rx.recv().await {
@@ -371,33 +392,47 @@ async fn handle_notifications(
 
                 // Check if this device was previously attached
                 let was_attached = previously_attached.read().await.contains(&device.id);
-                if was_attached {
+
+                // Check if this device matches auto_attach filter
+                let matches_filter = server_config.as_ref().map(|s| {
+                    s.should_auto_attach(
+                        device.vendor_id,
+                        device.product_id,
+                        device.product.as_deref(),
+                    )
+                }).unwrap_or(false);
+
+                // Auto-attach if previously attached OR matches auto_attach filter
+                if was_attached || matches_filter {
+                    let reason = if was_attached { "previously attached" } else { "matches auto_attach filter" };
                     info!(
-                        "Auto-reattaching previously attached device {:?} ({:04x}:{:04x})",
-                        device.id, device.vendor_id, device.product_id
+                        "Auto-attaching device {:?} ({:04x}:{:04x}) - {}",
+                        device.id, device.vendor_id, device.product_id, reason
                     );
 
-                    // Attempt to re-attach the device
+                    // Attempt to attach the device
                     match IrohClient::create_device_proxy(client.clone(), server_id, device.clone())
                         .await
                     {
                         Ok(device_proxy) => match virtual_usb.attach_device(device_proxy).await {
                             Ok(global_id) => {
                                 info!(
-                                    "Auto-reattach successful for device {:?} ({})",
+                                    "Auto-attach successful for device {:?} ({})",
                                     device.id, global_id
                                 );
+                                // Track for future auto-reattach
+                                previously_attached.write().await.insert(device.id);
                             }
                             Err(e) => {
                                 warn!(
-                                    "Auto-reattach failed for device {:?}: {:#}",
+                                    "Auto-attach failed for device {:?}: {:#}",
                                     device.id, e
                                 );
                             }
                         },
                         Err(e) => {
                             warn!(
-                                "Failed to create device proxy for auto-reattach {:?}: {:#}",
+                                "Failed to create device proxy for auto-attach {:?}: {:#}",
                                 device.id, e
                             );
                         }

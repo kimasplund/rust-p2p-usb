@@ -9,12 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - GitHub Actions CI workflow for automated testing and building
+- **Multi-server architecture** with GlobalDeviceId for unique device identification across servers
+- **Server name lookup** - Connect using friendly names (`--connect pi5-home`) instead of 64-char EndpointIds
+- **Per-device auto_attach filtering** - Granular control over which devices to auto-attach per server:
+  - Pattern formats: `"vid:pid"` (exact), `"vid:*"` (vendor wildcard), `"ProductName"` (substring)
+  - Configurable per server in `[[servers.configured]]` sections
+- **Enhanced client configuration**:
+  - `[[servers.configured]]` sections with `name`, `auto_connect`, and `auto_attach` fields
+  - Three auto-connect modes: `manual`, `auto`, `full`
+  - Global auto-connect override via `global_auto_connect`
+- Device hotplug auto-attach based on configured filters
 
 ### Changed
-- Nothing yet
+- Config default path changed from `~/.config/rust-p2p-usb/` to `~/.config/p2p-usb/` for consistency
+- Device listing now shows `[auto]`/`[skip]` status based on auto_attach configuration
+- `handle_notifications` now auto-attaches new devices matching filters (not just previously attached)
 
 ### Fixed
-- Nothing yet
+- Configuration file discovery (was looking in wrong directory)
 
 ---
 

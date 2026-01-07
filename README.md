@@ -22,10 +22,13 @@ A high-performance Rust application that enables secure USB device sharing betwe
 
 ### Client
 - **Remote device access** - Connect to USB devices over the internet
+- **Multi-server support** - Connect to multiple servers simultaneously
+- **Server names** - Use friendly names instead of 64-char EndpointIds
+- **Per-device auto-attach** - Fine-grained control over which devices to attach
 - **Terminal UI** - Manage multiple server connections and remote devices
-- **Auto-reconnection** - Basic reconnection handling
+- **Auto-reconnection** - Automatic reconnection with device reattachment
 - **Approved servers** - Whitelist of trusted server node IDs
-- **Device filtering** - Show only relevant devices based on VID/PID
+- **Device filtering** - Filter by VID:PID patterns or product name
 - **Performance metrics** - Monitor latency and throughput in real-time
 
 ### Core Technology
@@ -208,23 +211,61 @@ Create a configuration file at `~/.config/p2p-usb/client.toml`:
 
 ```toml
 [client]
-# Auto-connect to known servers on startup
-auto_connect = true
-
-# Log level
+# Log level: trace, debug, info, warn, error
 log_level = "info"
 
+# Optional: global auto-connect override (applies to all servers)
+# global_auto_connect = "auto"
+
 [servers]
-# List of approved server node IDs
-approved_servers = [
-    # "iroh_node_id_server_1",
-    # "iroh_node_id_server_2",
-]
+# Legacy format (still supported): simple list of approved server node IDs
+# approved_servers = ["iroh_node_id_server_1"]
+
+# New format: detailed server configurations with names and auto-connect
+[[servers.configured]]
+node_id = "e8f5a338d37c57356f683b8ee964de07c7e755f5c907cf93ccf44e4b04412dd8"
+name = "pi5-home"           # Friendly name for --connect
+auto_connect = "auto"       # "manual", "auto", or "full"
+auto_attach = ["1050:*", "Brother"]  # Device filters (optional)
+
+[[servers.configured]]
+node_id = "db0387f2f75f322f8c9806e0c90d9803e6174f2add002715ffc3a81e3b332d4c"
+name = "pi5-office"
+auto_connect = "manual"
+# No auto_attach = manual device selection
 
 [iroh]
 # Optional: specify custom Iroh relay servers
 # relay_servers = ["https://relay.example.com"]
+# Optional: path to secret key file for stable EndpointId
+# secret_key_path = "/path/to/secret_key"
 ```
+
+#### Auto-Connect Modes
+
+| Mode | Behavior |
+|------|----------|
+| `manual` | No auto-connect on startup |
+| `auto` | Connect to server, wait for manual device selection |
+| `full` | Connect and attach ALL shared devices |
+
+#### Per-Device Auto-Attach
+
+The `auto_attach` field allows fine-grained control over which devices to auto-attach:
+
+```toml
+auto_attach = [
+    "04f9:0042",    # Exact vendor:product ID
+    "1050:*",       # All devices from vendor (Yubico)
+    "Brother",      # Product name contains "Brother" (case-insensitive)
+]
+```
+
+Behavior with `auto_attach`:
+- `auto_connect = "auto"` + empty `auto_attach` → connect only, no auto-attach
+- `auto_connect = "auto"` + patterns → connect and attach matching devices
+- `auto_connect = "full"` + empty → attach ALL devices
+- `auto_connect = "full"` + patterns → attach only matching devices
 
 ### Setting Up Approved Endpoints
 
@@ -292,11 +333,20 @@ sudo systemctl status p2p-usb-server
 
 **Interactive Mode:**
 ```bash
-# Connect to specific server
-p2p-usb-client --connect <server-node-id>
+# Connect using server name (configured in client.toml)
+p2p-usb-client --connect pi5-home
+
+# Connect using full EndpointId
+p2p-usb-client --connect e8f5a338d37c57356f683b8ee964de07c7e755f5c907cf93ccf44e4b04412dd8
+
+# Run in headless mode (no TUI)
+p2p-usb-client --connect pi5-home --headless
 
 # Run with custom config
 p2p-usb-client --config /path/to/config.toml
+
+# Debug logging
+p2p-usb-client --connect pi5-home --log-level debug
 ```
 
 **TUI Keybindings:**

@@ -152,7 +152,9 @@ rust-p2p-usb/
 │       ├── src/
 │       │   ├── iroh_ext.rs    # Iroh extensions
 │       │   ├── usb_types.rs   # USB types
-│       │   └── error.rs
+│       │   ├── error.rs
+│       │   ├── rate_limiter.rs # Bandwidth limiting
+│       │   └── metrics.rs     # Transfer metrics
 │       └── Cargo.toml
 │
 ├── docs/                      # Documentation
@@ -267,8 +269,8 @@ When working on this project:
 
 ## Current Implementation Status
 
-**Project Stage**: Alpha (v0.1.0)
-**Overall Completion**: ~75%
+**Project Stage**: Alpha - Feature Complete (Testing Phase)
+**Overall Completion**: ~85%
 
 ### What's Working
 - Iroh 0.95 P2P networking with EndpointId authentication
@@ -277,10 +279,15 @@ When working on this project:
 - Control, Bulk, and Interrupt transfers
 - Configuration files and CLI
 - Systemd service mode
+- Full TUI for both server and client with metrics display
+- Rate limiting with atomic try_consume/rollback
+- Connection health monitoring (RTT, quality assessment)
+- Notification aggregation for TUI responsiveness
+- USB 3.0 helpers (port_range_for_speed, optimal_urb_buffer_size)
+- Multi-server configuration with all_servers() merging
 
 ### Not Yet Implemented
-- TUI (scaffolding only, Phase 6)
-- Isochronous transfers (deferred to v0.2)
+- Isochronous transfers (infrastructure present, disabled)
 - macOS/Windows client (stubs only)
 - Performance benchmarking suite
 
@@ -291,11 +298,17 @@ When working on this project:
 - Added CMD_UNLINK support for transfer cancellation
 - Fixed USB speed codes and port allocation for USB 3.0+
 - Added kernel driver detachment/reattachment
+- Integrated rate limiter for bandwidth control
+- Added notification aggregator for batching rapid device events
+- Implemented health monitoring with RTT tracking and connection quality
+- Added USB 3.0 helpers for speed-aware port allocation
+- Wired detach_all_from_server() for clean disconnect handling
+- Enhanced TUI with TX/RX, latency, and throughput metrics
 
 See `/docs/PROJECT_STATUS.md` for detailed status and `/docs/CHANGELOG.md` for change history.
 
 ---
 
-**Last Updated**: 2026-01-05
+**Last Updated**: 2026-01-07
 **Initialized by**: init-workspace-v2
-**Project Stage**: Alpha (v0.1.0)
+**Project Stage**: Alpha - Feature Complete (Testing Phase)

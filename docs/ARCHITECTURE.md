@@ -1,8 +1,8 @@
 # rust-p2p-usb Architecture Design Document
 
-**Version**: 1.0  
-**Date**: 2025-10-31  
-**Status**: Design Complete - Ready for Implementation  
+**Version**: 1.1
+**Date**: 2026-01-07
+**Status**: Implementation Complete - Testing Phase
 **Confidence**: 89%
 
 ---
@@ -81,6 +81,27 @@ These 2025 developments directly informed our architecture:
 3. Custom protocol instead of USB/IP (optimize for QUIC, not TCP)
 4. Async channel bridge (Iroh team's recommendation: async-channel for cancel-safety)
 
+### January 2025 Integration Updates
+
+The following components were integrated in January 2025:
+
+**Server-Side:**
+- Rate limiter in `connection.rs` - enforces bandwidth limits using atomic `try_consume()` with `rollback()` on failure
+- Notification aggregator - batches rapid device events to avoid TUI flickering
+- Server metrics tracking - per-client and per-device statistics (TX/RX bytes, latency)
+- Enhanced TUI metrics display - shows throughput, latency, and active transfers
+
+**Client-Side:**
+- Health monitoring (`health.rs`) - RTT tracking with min/current/max, connection quality (Good/Fair/Poor), heartbeat counts
+- USB 3.0 helpers - `port_range_for_speed()` for correct VHCI port allocation (HS: 0-7, SS: 8-15)
+- Multi-server config - `all_servers()` merges legacy `approved_servers` with new `configured` servers
+- Bulk cleanup - `detach_all_from_server()` for clean disconnect handling
+
+**Common Crate:**
+- Enhanced rate limiter - atomic operations prevent race conditions in concurrent transfer limiting
+- Transfer metrics - `record_transfer()`, `rolling_window_duration()`, public `SAMPLE_INTERVAL_MS`
+- Protocol SIZE constants - compile-time validated via assertions
+
 ---
 
 ## System Architecture
@@ -133,14 +154,19 @@ These 2025 developments directly informed our architecture:
 - Proxy USB requests to physical hardware
 - TUI for device selection and connection monitoring
 - Systemd service integration
+- Rate limiting for bandwidth control on transfers
+- Notification aggregation for batching rapid device events
+- Per-client/per-device metrics tracking
 
 **Client Binary** (`crates/client`):
 - Connect to server using NodeId
 - List available remote devices
 - Attach to devices (creates virtual USB device)
 - Proxy application USB requests to server
-- TUI for device management
+- TUI for device management with health metrics display
 - Virtual USB device creation (platform-specific)
+- Connection health monitoring (RTT, quality, heartbeats)
+- Multi-server configuration support
 
 **Protocol Library** (`crates/protocol`):
 - Message type definitions
@@ -154,6 +180,8 @@ These 2025 developments directly informed our architecture:
 - Shared error types
 - Async channel bridge utilities
 - Tracing/logging setup
+- Rate limiter with atomic try_consume/rollback
+- Transfer metrics with rolling window statistics
 
 ---
 
@@ -180,10 +208,12 @@ rust-p2p-usb/
 │   │       │   ├── mod.rs               # Network subsystem public API
 │   │       │   ├── server.rs            # Iroh endpoint, accept connections
 │   │       │   ├── session.rs           # Per-client session management
-│   │       │   └── streams.rs           # QUIC stream multiplexing
+│   │       │   ├── streams.rs           # QUIC stream multiplexing
+│   │       │   ├── connection.rs        # Client handling + rate limiting
+│   │       │   └── notification_aggregator.rs  # Event batching for TUI
 │   │       ├── tui/
 │   │       │   ├── mod.rs               # TUI public API
-│   │       │   ├── app.rs               # Application state
+│   │       │   ├── app.rs               # Application state + metrics display
 │   │       │   ├── ui.rs                # Ratatui rendering
 │   │       │   └── events.rs            # Input handling
 │   │       └── service.rs               # Systemd integration
@@ -192,10 +222,10 @@ rust-p2p-usb/
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── main.rs                  # Entry point, CLI
-│   │       ├── config.rs                # Configuration (server NodeId, etc.)
+│   │       ├── config.rs                # Configuration (multi-server, all_servers() merging)
 │   │       ├── virtual_usb/
 │   │       │   ├── mod.rs               # Virtual USB public API
-│   │       │   ├── linux.rs             # Linux usbfs/gadgetfs implementation
+│   │       │   ├── linux.rs             # vhci_hcd + USB 3.0 helpers (port_range_for_speed)
 │   │       │   ├── macos.rs             # macOS IOKit implementation (future)
 │   │       │   ├── windows.rs           # Windows (future)
 │   │       │   └── device.rs            # Virtual device state
@@ -203,10 +233,11 @@ rust-p2p-usb/
 │   │       │   ├── mod.rs               # Network subsystem public API
 │   │       │   ├── client.rs            # Iroh endpoint, connect to server
 │   │       │   ├── session.rs           # Server session management
-│   │       │   └── streams.rs           # QUIC stream handling
+│   │       │   ├── streams.rs           # QUIC stream handling
+│   │       │   └── health.rs            # Connection health monitoring (RTT, quality)
 │   │       └── tui/
 │   │           ├── mod.rs               # TUI public API
-│   │           ├── app.rs               # Application state
+│   │           ├── app.rs               # Application state + health metrics display
 │   │           ├── ui.rs                # Ratatui rendering
 │   │           └── events.rs            # Input handling
 │   │
@@ -227,7 +258,9 @@ rust-p2p-usb/
 │           ├── usb_types.rs             # USB abstractions
 │           ├── error.rs                 # Error types (thiserror)
 │           ├── channel.rs               # Async channel bridge utilities
-│           └── logging.rs               # Tracing setup
+│           ├── logging.rs               # Tracing setup
+│           ├── rate_limiter.rs          # Bandwidth limiting (atomic try_consume/rollback)
+│           └── metrics.rs               # Transfer metrics (record_transfer, rolling_window)
 │
 ├── docs/
 │   ├── ARCHITECTURE.md        # This file
@@ -2368,12 +2401,13 @@ fn test_message_roundtrip() {
 
 ## Metadata
 
-**Patterns Used**: Breadth-of-thought, Tree-of-thoughts, Self-reflecting-chain  
-**Total Reasoning Depth**: 10 BoT approaches + 5 ToT levels + 8 SRCoT steps  
-**Temporal Research**: 8 sources (Iroh blog, rusb issues, USB/IP spec, Tokio best practices)  
-**Analysis Duration**: ~2 hours (comprehensive integrated reasoning)  
-**Document Length**: ~13,000 words  
-**Last Updated**: 2025-10-31
+**Patterns Used**: Breadth-of-thought, Tree-of-thoughts, Self-reflecting-chain
+**Total Reasoning Depth**: 10 BoT approaches + 5 ToT levels + 8 SRCoT steps
+**Temporal Research**: 8 sources (Iroh blog, rusb issues, USB/IP spec, Tokio best practices)
+**Analysis Duration**: ~2 hours (comprehensive integrated reasoning)
+**Document Length**: ~13,000 words
+**Last Updated**: 2026-01-07
+**Implementation Status**: Feature Complete - Testing Phase
 
 ---
 

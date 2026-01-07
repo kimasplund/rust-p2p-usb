@@ -1,8 +1,8 @@
 # rust-p2p-usb Project Status
 
-**Last Updated**: 2026-01-05
+**Last Updated**: 2026-01-07
 **Version**: 0.1.0 (Development)
-**Stage**: Alpha - Feature Development
+**Stage**: Alpha - Feature Complete (Testing Phase)
 
 ---
 
@@ -18,17 +18,17 @@ rust-p2p-usb is a high-performance Rust application for secure peer-to-peer USB 
 |-------|-------------|--------|------------|
 | Phase 0 | Project Setup | Complete | 100% |
 | Phase 1 | Protocol Foundation | Complete | 100% |
-| Phase 2 | USB Subsystem (Server) | Complete | 95% |
-| Phase 3 | Network Layer (Server) | Complete | 95% |
-| Phase 4 | Network Layer (Client) | Complete | 95% |
-| Phase 5 | Virtual USB (Client) | Complete | 90% |
-| Phase 6 | TUI (Server & Client) | Complete | 90% |
-| Phase 7 | Configuration & CLI | Complete | 95% |
-| Phase 8 | Systemd Integration | Complete | 90% |
-| Phase 9 | Integration Testing | In Progress | 40% |
-| Phase 10 | Documentation & Release | In Progress | 50% |
+| Phase 2 | USB Subsystem (Server) | Complete | 100% |
+| Phase 3 | Network Layer (Server) | Complete | 100% |
+| Phase 4 | Network Layer (Client) | Complete | 100% |
+| Phase 5 | Virtual USB (Client) | Complete | 95% |
+| Phase 6 | TUI (Server & Client) | Complete | 95% |
+| Phase 7 | Configuration & CLI | Complete | 100% |
+| Phase 8 | Systemd Integration | Complete | 95% |
+| Phase 9 | Integration Testing | In Progress | 60% |
+| Phase 10 | Documentation & Release | In Progress | 70% |
 
-**Overall Project Completion: ~75%**
+**Overall Project Completion: ~85%**
 
 ---
 
@@ -58,6 +58,8 @@ rust-p2p-usb is a high-performance Rust application for secure peer-to-peer USB 
   - USB/IP import protocol handshake
   - CMD_SUBMIT and CMD_UNLINK message handling
   - RET_SUBMIT and RET_UNLINK responses
+  - USB 3.0 helpers (optimal_urb_buffer_size, port_range_for_speed)
+  - Bulk cleanup via detach_all_from_server()
 
 - **Protocol Layer**
   - Type-safe message definitions with serde
@@ -70,6 +72,8 @@ rust-p2p-usb is a high-performance Rust application for secure peer-to-peer USB 
   - CLI argument parsing with clap
   - Allowlist support for client/server EndpointIds
   - Log level configuration
+  - Multi-server config with all_servers() merging legacy + new format
+  - AutoConnectMode (Manual, Auto, AutoWithDevices)
 
 - **Systemd Integration**
   - Service mode (headless operation)
@@ -85,6 +89,31 @@ rust-p2p-usb is a high-performance Rust application for secure peer-to-peer USB 
 4. **CMD_UNLINK Support**: Proper handling of USB transfer cancellation
 5. **TCP Socket Bridge**: Refactored from Unix sockets to TCP for USB/IP
 6. **Kernel Driver Management**: Auto-detach/reattach for shared devices
+
+### January 2025 Integration Milestone
+
+**Server-Side Integrations:**
+- Rate limiter enforces bandwidth limits on transfers (atomic try_consume with rollback)
+- Notification aggregator batches rapid device events for TUI responsiveness
+- Server metrics tracking with per-client and per-device statistics
+- Enhanced TUI displaying TX/RX bytes, latency, and throughput metrics
+
+**Client-Side Integrations:**
+- Health monitoring with RTT tracking (min/current/max) and connection quality (Good/Fair/Poor)
+- Health metrics display in TUI with heartbeat counts
+- Multi-server config merging legacy approved_servers with configured servers
+- detach_all_from_server() wired up in TUI disconnect flow
+
+**Common Crate Enhancements:**
+- Enhanced rate limiter with atomic try_consume() and rollback()
+- Metrics helpers: record_transfer(), rolling_window_duration()
+- SAMPLE_INTERVAL_MS made public for consistent timing
+- Protocol SIZE constants validated via compile-time assertions
+
+**Architecture Updates:**
+- create_health_monitor() factory pattern for consistent initialization
+- max_retries now used in reconnection policy
+- Optimized response conversion (simple vs full ISO support)
 
 ---
 
@@ -112,8 +141,8 @@ rust-p2p-usb is a high-performance Rust application for secure peer-to-peer USB 
    - **Impact**: Client only works on Linux
 
 5. **Hot-plug Detection on Client**
-   - **Status**: Not implemented
-   - **Impact**: Must restart client to see new server devices
+   - **Status**: Implemented (notification aggregator batches events)
+   - **Impact**: Resolved - client receives device events in real-time
 
 ---
 
@@ -145,9 +174,11 @@ rust-p2p-usb/
 │   ├── common/                   # Shared utilities [100%]
 │   │   ├── src/channel.rs        # USB bridge channels
 │   │   ├── src/logging.rs        # Tracing setup
-│   │   └── src/alpn.rs           # Protocol identifier
+│   │   ├── src/alpn.rs           # Protocol identifier
+│   │   ├── src/rate_limiter.rs   # Bandwidth limiting
+│   │   └── src/metrics.rs        # Transfer metrics
 │   │
-│   ├── server/                   # Server binary [90%]
+│   ├── server/                   # Server binary [95%]
 │   │   ├── src/main.rs           # Entry point, CLI
 │   │   ├── src/usb/              # USB management
 │   │   │   ├── worker.rs         # USB thread
@@ -155,22 +186,24 @@ rust-p2p-usb/
 │   │   │   └── transfers.rs      # Transfer handling
 │   │   ├── src/network/          # Iroh server
 │   │   │   ├── server.rs         # Accept connections
-│   │   │   └── connection.rs     # Client handling
+│   │   │   ├── connection.rs     # Client handling + rate limiting
+│   │   │   └── notification_aggregator.rs  # Event batching
 │   │   ├── src/config.rs         # TOML config
 │   │   ├── src/service.rs        # Systemd integration
-│   │   └── src/tui/              # TUI (scaffolding)
+│   │   └── src/tui/              # TUI with metrics display
 │   │
-│   └── client/                   # Client binary [85%]
+│   └── client/                   # Client binary [95%]
 │       ├── src/main.rs           # Entry point, CLI
 │       ├── src/virtual_usb/      # Virtual USB devices
-│       │   ├── linux.rs          # vhci_hcd integration
+│       │   ├── linux.rs          # vhci_hcd + USB 3.0 helpers
 │       │   ├── socket_bridge.rs  # USB/IP socket bridge
 │       │   └── usbip_protocol.rs # USB/IP wire protocol
 │       ├── src/network/          # Iroh client
 │       │   ├── client.rs         # Server connections
-│       │   └── device_proxy.rs   # Remote device proxy
-│       ├── src/config.rs         # TOML config
-│       └── src/tui/              # TUI (scaffolding)
+│       │   ├── device_proxy.rs   # Remote device proxy
+│       │   └── health.rs         # Connection health monitoring
+│       ├── src/config.rs         # TOML config + multi-server
+│       └── src/tui/              # TUI with health metrics
 │
 ├── docs/                         # Documentation
 ├── systemd/                      # Service files
@@ -198,21 +231,22 @@ rust-p2p-usb/
 2. [ ] Complete CHANGELOG.md
 3. [ ] Add basic integration tests
 4. [ ] Fix remaining clippy warnings
-5. [ ] Update documentation
+5. [x] Update documentation
 
 ### Short Term (v0.2.0)
 
 1. [ ] Polish TUI UX and add help screens
-2. [ ] Add interrupt transfer support
+2. [x] Add interrupt transfer support
 3. [ ] Performance benchmarking
-4. [ ] Reconnection logic with backoff
+4. [x] Reconnection logic with backoff (max_retries integrated)
 
 ### Medium Term (v0.3.0)
 
 1. [ ] Device filtering by VID/PID
-2. [ ] Performance metrics in TUI
+2. [x] Performance metrics in TUI (TX/RX, latency, throughput)
 3. [ ] Compression for control messages
 4. [ ] macOS client support research
+5. [ ] Isochronous transfers (infrastructure present, disabled)
 
 ---
 

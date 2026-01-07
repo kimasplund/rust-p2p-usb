@@ -8,25 +8,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
+#### Server-Side Integrations
+- **Rate limiter integration** - Bandwidth limiting enforced on transfers in `connection.rs`
+  - Uses atomic `try_consume()` with `rollback()` on failure
+  - Prevents bandwidth exhaustion from aggressive clients
+- **Notification aggregator** - Batches rapid device events for TUI responsiveness
+  - Prevents UI flickering during rapid hotplug sequences
+  - Configurable aggregation window
+- **Server metrics tracking** - Per-client and per-device statistics
+  - TX/RX bytes, latency measurements, active transfer counts
+  - Integrated into TUI display
+
+#### Client-Side Integrations
+- **Health monitoring** (`health.rs`) - Connection health tracking
+  - RTT measurement with min/current/max statistics
+  - Connection quality assessment (Good <50ms, Fair 50-150ms, Poor >150ms)
+  - Heartbeat tracking and connection state (Connecting/Connected/Degraded/Disconnected)
+  - Factory pattern: `create_health_monitor()` for consistent initialization
+- **USB 3.0 helpers** - Speed-aware port allocation
+  - `port_range_for_speed()` returns correct VHCI port ranges (HS: 0-7, SS: 8-15)
+  - `is_superspeed_port()`, `is_high_speed_port()` helpers
+  - `optimal_urb_buffer_size()` for speed-appropriate buffer sizing
+- **Bulk device cleanup** - `detach_all_from_server()` for clean disconnect handling
+- **Health metrics TUI display** - Shows RTT, quality, and heartbeat counts per server
+
+#### Common Crate Enhancements
+- **Enhanced rate limiter** - Atomic operations for thread-safe bandwidth limiting
+  - `try_consume()` returns success/failure without blocking
+  - `rollback()` for undoing consumption on transfer failure
+- **Transfer metrics helpers**
+  - `record_transfer()` for recording transfer statistics
+  - `rolling_window_duration()` for windowed throughput calculation
+  - `SAMPLE_INTERVAL_MS` made public for consistent timing
+- **Protocol SIZE constants** - Compile-time validated via static assertions
+
+#### Configuration Enhancements
+- **Multi-server config** with `all_servers()` merging
+  - Combines legacy `approved_servers` with new `[[servers.configured]]` format
+  - Configured servers take precedence over legacy entries
+- **AutoConnectMode enum** - Manual, Auto, AutoWithDevices
 - GitHub Actions CI workflow for automated testing and building
 - **Multi-server architecture** with GlobalDeviceId for unique device identification across servers
 - **Server name lookup** - Connect using friendly names (`--connect pi5-home`) instead of 64-char EndpointIds
 - **Per-device auto_attach filtering** - Granular control over which devices to auto-attach per server:
   - Pattern formats: `"vid:pid"` (exact), `"vid:*"` (vendor wildcard), `"ProductName"` (substring)
   - Configurable per server in `[[servers.configured]]` sections
-- **Enhanced client configuration**:
-  - `[[servers.configured]]` sections with `name`, `auto_connect`, and `auto_attach` fields
-  - Three auto-connect modes: `manual`, `auto`, `full`
-  - Global auto-connect override via `global_auto_connect`
 - Device hotplug auto-attach based on configured filters
 
 ### Changed
 - Config default path changed from `~/.config/rust-p2p-usb/` to `~/.config/p2p-usb/` for consistency
 - Device listing now shows `[auto]`/`[skip]` status based on auto_attach configuration
 - `handle_notifications` now auto-attaches new devices matching filters (not just previously attached)
+- **TUI enhanced** - Server TUI now displays TX/RX bytes, latency, throughput metrics
+- **Reconnection policy** - `max_retries` now used in reconnection logic
+- **Response conversion optimized** - Simple vs full ISO support paths
 
 ### Fixed
 - Configuration file discovery (was looking in wrong directory)
+- Hot-plug detection on client now works via notification aggregator
 
 ---
 
@@ -144,9 +184,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Minimal privileges support via udev rules
 
 ### Known Issues
-- TUI not yet implemented (scaffolding only)
 - Virtual USB enumeration may stall in some cases
-- Isochronous transfers not supported
+- Isochronous transfers not supported (infrastructure present but disabled)
 - macOS/Windows client not implemented (stubs only)
 
 ---

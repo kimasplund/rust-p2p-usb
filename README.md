@@ -19,6 +19,9 @@ A high-performance Rust application that enables secure USB device sharing betwe
 - **System service** - Run as a systemd service for always-on availability
 - **Low resource usage** - Optimized for single-board computers like Raspberry Pi
 - **Real-time monitoring** - Live device connection status and data transfer metrics
+- **Rate limiting** - Bandwidth control with atomic try_consume/rollback operations
+- **Notification aggregation** - Batches rapid device events for TUI responsiveness
+- **Per-client metrics** - TX/RX bytes, latency, and throughput per client
 
 ### Client
 - **Remote device access** - Connect to USB devices over the internet
@@ -26,10 +29,12 @@ A high-performance Rust application that enables secure USB device sharing betwe
 - **Server names** - Use friendly names instead of 64-char EndpointIds
 - **Per-device auto-attach** - Fine-grained control over which devices to attach
 - **Terminal UI** - Manage multiple server connections and remote devices
-- **Auto-reconnection** - Automatic reconnection with device reattachment
+- **Auto-reconnection** - Automatic reconnection with device reattachment (max_retries policy)
 - **Approved servers** - Whitelist of trusted server node IDs
 - **Device filtering** - Filter by VID:PID patterns or product name
 - **Performance metrics** - Monitor latency and throughput in real-time
+- **Health monitoring** - RTT tracking (min/current/max), connection quality (Good/Fair/Poor)
+- **USB 3.0 support** - Speed-aware port allocation and buffer sizing
 
 ### Core Technology
 - **Iroh networking** - Built on Iroh for reliable P2P connectivity with NAT traversal
@@ -482,7 +487,9 @@ rust-p2p-usb/
 │           ├── lib.rs
 │           ├── iroh_ext.rs    # Iroh extensions
 │           ├── usb_types.rs   # USB type definitions
-│           └── error.rs       # Error types
+│           ├── error.rs       # Error types
+│           ├── rate_limiter.rs # Bandwidth limiting
+│           └── metrics.rs     # Transfer metrics
 │
 ├── docs/                      # Documentation
 │   ├── ARCHITECTURE.md        # Detailed architecture
@@ -605,30 +612,30 @@ RUST_LOG=debug p2p-usb-server 2>&1 | tee server.log
 - [x] USB/IP protocol implementation
 - [x] Kernel driver management (detach/reattach)
 
-### Phase 2: User Experience (v0.2) - IN PROGRESS
+### Phase 2: User Experience (v0.2) - COMPLETE
 - [x] CLI argument parsing
 - [x] Comprehensive logging with tracing
 - [x] Terminal UI (TUI) for server and client
-- [ ] Error recovery and reconnection
-- [ ] Performance metrics display
+- [x] Error recovery and reconnection (max_retries policy)
+- [x] Performance metrics display (TX/RX, latency, throughput)
 - [x] Device filtering by VID/PID
 
-### Phase 3: Enhanced Features (v0.3)
-- [ ] Isochronous transfers (for audio/video devices)
-- [ ] QR code for easy server connection
-- [ ] Connection health monitoring
-- [ ] Bandwidth usage statistics
-- [ ] Hot-plug notification to clients
+### Phase 3: Enhanced Features (v0.3) - MOSTLY COMPLETE
+- [ ] Isochronous transfers (infrastructure present, disabled)
+- [x] QR code for easy server connection
+- [x] Connection health monitoring (RTT min/current/max, quality)
+- [x] Bandwidth usage statistics (per-client, per-device metrics)
+- [x] Hot-plug notification to clients (notification aggregator)
 
-### Phase 4: Advanced Features (v1.0)
+### Phase 4: Advanced Features (v1.0) - IN PROGRESS
 - [ ] Multi-client support (device sharing)
 - [ ] Device passthrough policies (time-based access)
-- [ ] Bandwidth limiting and QoS
+- [x] Bandwidth limiting and QoS (rate limiter with atomic ops)
 - [ ] macOS client support
 - [ ] Windows client support
 
 ### Future Considerations
-- [ ] USB 3.0 SuperSpeed optimization
+- [x] USB 3.0 SuperSpeed optimization (port_range_for_speed, optimal_urb_buffer_size)
 - [ ] Web-based management interface
 - [ ] Mobile client support
 - [ ] Encrypted device storage (for security keys)

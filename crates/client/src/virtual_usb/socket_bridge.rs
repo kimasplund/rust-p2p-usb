@@ -215,17 +215,30 @@ impl SocketBridge {
             let message = match self.read_usbip_message_blocking() {
                 Ok(msg) => msg,
                 Err(e) => {
-                    // Check if connection was closed gracefully
+                    // Check if connection was closed (various error messages indicate closure)
                     let err_str = e.to_string();
                     if err_str.contains("unexpected end of file")
                         || err_str.contains("end of file")
                         || err_str.contains("early eof")
+                        || err_str.contains("failed to fill whole buffer")
+                        || err_str.contains("Broken pipe")
+                        || err_str.contains("Connection reset")
                     {
-                        info!("vhci_hcd closed connection for port {}", self.port);
+                        info!(
+                            "vhci_hcd closed connection for port {} (kernel disconnected device)",
+                            self.port
+                        );
                         break;
                     }
+                    // EAGAIN/EWOULDBLOCK means no data available yet - this shouldn't happen
+                    // in blocking mode but handle it gracefully
+                    if err_str.contains("Resource temporarily unavailable") {
+                        debug!("Socket temporarily unavailable for port {}", self.port);
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
                     error!("Failed to read USB/IP message: {:#}", e);
-                    // On error, sleep briefly to avoid tight loop
+                    // On unexpected error, sleep briefly to avoid tight loop
                     std::thread::sleep(std::time::Duration::from_millis(10));
                     continue;
                 }

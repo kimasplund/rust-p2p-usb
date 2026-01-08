@@ -423,14 +423,25 @@ pub async fn usbip_to_usb_request(
         let request = cmd.setup[1];
         let value = u16::from_le_bytes([cmd.setup[2], cmd.setup[3]]);
         let index = u16::from_le_bytes([cmd.setup[4], cmd.setup[5]]);
-        // wLength is in setup[6..8], but data length comes from transfer_buffer_length
+        // wLength is in setup[6..8], used for buffer size on IN transfers
+
+        // For control IN transfers (request_type bit 7 set), we need to tell the server
+        // how much data to read. The data vec is empty for IN transfers, but the server
+        // uses data.len() to determine buffer size. Create a buffer of transfer_buffer_length.
+        let control_data = if (request_type & 0x80) != 0 && data.is_empty() {
+            // Control IN: create buffer of expected size from transfer_buffer_length
+            vec![0u8; cmd.transfer_buffer_length as usize]
+        } else {
+            // Control OUT: use the data as-is
+            data
+        };
 
         TransferType::Control {
             request_type,
             request,
             value,
             index,
-            data,
+            data: control_data,
         }
     } else {
         // Bulk or Interrupt transfer based on endpoint and interval
@@ -483,15 +494,17 @@ pub async fn usbip_to_usb_request(
                 interval: cmd.interval,
                 timeout_ms,
             }
-        } else if cmd.interval > 1 {
-            // Interrupt transfer (has meaningful polling interval)
+        } else if cmd.interval >= 1 {
+            // Interrupt transfer (has polling interval >= 1)
+            // HID devices (keyboards, mice) typically use interval=1 for high-speed
+            // The previous condition (interval > 1) incorrectly classified these as bulk
             TransferType::Interrupt {
                 endpoint,
                 data: transfer_data,
                 timeout_ms,
             }
         } else {
-            // Bulk transfer (interval=0 or interval=1 which is commonly set for bulk)
+            // Bulk transfer (interval=0, used by mass storage, CDC, etc.)
             TransferType::Bulk {
                 endpoint,
                 data: transfer_data,

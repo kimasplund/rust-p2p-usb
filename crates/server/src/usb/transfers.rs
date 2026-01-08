@@ -328,6 +328,11 @@ fn execute_interrupt_transfer(
             Ok(len) => {
                 buffer.truncate(len);
                 if len > 0 {
+                    // Log HID data for debugging - helps trace data corruption issues
+                    eprintln!(
+                        "[SERVER HID] Interrupt IN ep={:#x} len={} data={:02x?}",
+                        endpoint, len, &buffer[..len.min(16)]
+                    );
                     debug!(
                         "Interrupt IN endpoint {:#x}: received {} bytes",
                         endpoint, len

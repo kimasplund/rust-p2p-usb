@@ -44,7 +44,7 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{RwLock, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, RwLock, oneshot};
 use tracing::{debug, error, info, trace};
 
 /// Socket bridge for USB/IP protocol
@@ -69,6 +69,11 @@ pub struct SocketBridge {
     pending_transfers: Arc<RwLock<HashMap<u32, oneshot::Sender<()>>>>,
     /// Optimal URB buffer size based on device speed
     optimal_buffer_size: usize,
+    /// Per-endpoint locks for serializing interrupt IN transfers
+    /// Key is endpoint address (e.g., 0x81 for EP1 IN)
+    /// This prevents race conditions where multiple concurrent reads from the
+    /// same interrupt endpoint cause duplicate or lost HID reports
+    interrupt_endpoint_locks: Arc<RwLock<HashMap<u8, Arc<AsyncMutex<()>>>>>,
 }
 
 impl SocketBridge {
@@ -120,6 +125,7 @@ impl SocketBridge {
             running: Arc::new(AtomicBool::new(true)),
             pending_transfers: Arc::new(RwLock::new(HashMap::new())),
             optimal_buffer_size: buffer_size,
+            interrupt_endpoint_locks: Arc::new(RwLock::new(HashMap::new())),
         };
 
         debug!(
@@ -229,6 +235,7 @@ impl SocketBridge {
                     let device_proxy = self.device_proxy.clone();
                     let socket = self.socket.clone();
                     let pending_transfers = self.pending_transfers.clone();
+                    let interrupt_locks = self.interrupt_endpoint_locks.clone();
                     let devid = self.devid;
 
                     rt.spawn(async move {
@@ -236,6 +243,7 @@ impl SocketBridge {
                             device_proxy,
                             socket,
                             pending_transfers,
+                            interrupt_locks,
                             devid,
                             header,
                             cmd,
@@ -265,10 +273,13 @@ impl SocketBridge {
     /// Handle CMD_SUBMIT asynchronously
     ///
     /// This is the async version that runs in spawned tasks for concurrent processing.
+    /// For interrupt IN transfers, we serialize requests per-endpoint to prevent race
+    /// conditions where multiple concurrent USB reads cause duplicate or lost HID reports.
     async fn handle_cmd_submit_async(
         device_proxy: Arc<DeviceProxy>,
         socket: Arc<std::sync::Mutex<UnixStream>>,
         pending_transfers: Arc<RwLock<HashMap<u32, oneshot::Sender<()>>>>,
+        interrupt_locks: Arc<RwLock<HashMap<u8, Arc<AsyncMutex<()>>>>>,
         devid: u32,
         header: UsbIpHeader,
         cmd: UsbIpCmdSubmit,
@@ -276,6 +287,50 @@ impl SocketBridge {
     ) -> Result<()> {
         let seqnum = header.seqnum;
         let max_data_len = cmd.transfer_buffer_length as usize;
+
+        // Check if this is an interrupt IN transfer that needs serialization
+        // Interrupt transfers have bmRequestType with endpoint type = interrupt (0x03)
+        // But in USB/IP, we detect by endpoint address (direction bit 7 = 1 for IN)
+        // and transfer type from setup packet or endpoint characteristics.
+        // For simplicity, we serialize ALL IN transfers on high-numbered endpoints (>= 0x81)
+        // as these are typically interrupt IN endpoints for HID devices.
+        let is_interrupt_in = header.direction == 1 && header.ep > 0;
+        let endpoint_addr: u8 = if is_interrupt_in {
+            (header.ep | 0x80) as u8 // Add IN direction bit
+        } else {
+            header.ep as u8
+        };
+
+        // For interrupt IN, acquire per-endpoint lock to serialize transfers
+        // This prevents multiple concurrent USB reads from the same endpoint
+        // We keep the Arc alive alongside the guard
+        let endpoint_lock: Option<Arc<AsyncMutex<()>>> = if is_interrupt_in {
+            // Get or create the lock for this endpoint
+            let lock = {
+                let mut locks = interrupt_locks.write().await;
+                locks
+                    .entry(endpoint_addr)
+                    .or_insert_with(|| {
+                        trace!("Creating endpoint lock for ep=0x{:02x}", endpoint_addr);
+                        Arc::new(AsyncMutex::new(()))
+                    })
+                    .clone()
+            };
+            Some(lock)
+        } else {
+            None
+        };
+
+        // Acquire the guard (must be done after lock is stored in endpoint_lock)
+        let _endpoint_guard = if let Some(ref lock) = endpoint_lock {
+            trace!(
+                "Acquiring endpoint lock: seqnum={}, ep=0x{:02x}",
+                seqnum, endpoint_addr
+            );
+            Some(lock.lock().await)
+        } else {
+            None
+        };
 
         // Create cancellation channel for this transfer
         let (cancel_tx, _cancel_rx) = oneshot::channel::<()>();
@@ -295,8 +350,8 @@ impl SocketBridge {
         let usb_request = usbip_to_usb_request(&device_proxy, &header, &cmd, data).await?;
 
         trace!(
-            "Submitting USB request: seqnum={}, id={}",
-            seqnum, usb_request.id.0
+            "Submitting USB request: seqnum={}, id={}, ep=0x{:02x}, serialized={}",
+            seqnum, usb_request.id.0, endpoint_addr, is_interrupt_in
         );
 
         // Submit to device proxy (async)

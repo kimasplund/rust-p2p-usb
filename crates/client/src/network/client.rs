@@ -730,24 +730,10 @@ impl IrohClient {
         server_id: EndpointId,
         server_addr: Option<EndpointAddr>,
     ) -> Result<ServerConnection> {
+        // ServerConnection::new() includes connection warm-up which does
+        // the capability exchange. No need to call send_client_capabilities() again.
         let connection =
             ServerConnection::new(self.endpoint.clone(), server_id, server_addr).await?;
-
-        // Exchange capabilities with server (required for push notifications)
-        match connection.send_client_capabilities().await {
-            Ok(will_send_notifications) => {
-                info!(
-                    "Capability exchange complete: server will_send_notifications={}",
-                    will_send_notifications
-                );
-            }
-            Err(e) => {
-                warn!(
-                    "Capability exchange failed: {:#}, continuing without push notifications",
-                    e
-                );
-            }
-        }
 
         // Setup notification forwarding
         let notification_tx_agg = self.notification_updates.clone();

@@ -168,7 +168,64 @@ impl ServerConnection {
         *self.connection.lock().await = Some(conn);
         *self.state.write().await = ConnectionState::Connected;
 
+        // Warm up the QUIC connection by opening a stream and completing a round-trip
+        // This ensures the connection is fully established before USB operations begin
+        // Without this, first USB transfer may timeout waiting for QUIC stream establishment
+        self.warm_up_connection().await?;
+
         Ok(())
+    }
+
+    /// Warm up the QUIC connection by completing a round-trip request
+    ///
+    /// This is critical for USB/IP: the kernel has a 5-second timeout for USB transfers,
+    /// but QUIC connection establishment can take 10+ seconds on first stream open.
+    /// By warming up the connection with ClientCapabilities exchange, we ensure
+    /// subsequent USB transfers complete within the kernel's timeout.
+    ///
+    /// Note: The server expects ClientCapabilities as the first message, so we use
+    /// that for warm-up rather than Ping.
+    async fn warm_up_connection(&self) -> Result<()> {
+        info!("Warming up QUIC connection...");
+        let start = Instant::now();
+
+        // Use ClientCapabilities for warm-up since server expects it first
+        let message = Message {
+            version: CURRENT_VERSION,
+            payload: MessagePayload::ClientCapabilities {
+                supports_push_notifications: true,
+            },
+        };
+
+        // Allow generous timeout for warm-up (30 seconds) since this is a one-time cost
+        let response = tokio::time::timeout(Duration::from_secs(30), self.send_message(message))
+            .await
+            .context("Connection warm-up timed out (30s)")?
+            .context("Failed to warm up connection")?;
+
+        match response.payload {
+            MessagePayload::ServerCapabilities {
+                will_send_notifications,
+            } => {
+                let elapsed = start.elapsed();
+                info!(
+                    "Connection warm-up complete in {:?} - server will push notifications: {}",
+                    elapsed, will_send_notifications
+                );
+                // Record this as the first RTT measurement
+                if elapsed.as_millis() > 1000 {
+                    warn!(
+                        "Slow connection detected: {:?} warm-up time. USB transfers may be affected.",
+                        elapsed
+                    );
+                }
+                Ok(())
+            }
+            MessagePayload::Error { message } => {
+                Err(anyhow!("Server error during warm-up: {}", message))
+            }
+            _ => Err(anyhow!("Unexpected response during warm-up")),
+        }
     }
 
     /// Reconnect with exponential backoff

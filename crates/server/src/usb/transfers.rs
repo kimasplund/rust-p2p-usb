@@ -329,13 +329,10 @@ fn execute_interrupt_transfer(
                 buffer.truncate(len);
                 if len > 0 {
                     // Log HID data for debugging - helps trace data corruption issues
-                    eprintln!(
-                        "[SERVER HID] Interrupt IN ep={:#x} len={} data={:02x?}",
+                    // Use trace! level to avoid spamming during normal operation
+                    trace!(
+                        "Interrupt IN ep={:#x} len={} data={:02x?}",
                         endpoint, len, &buffer[..len.min(16)]
-                    );
-                    debug!(
-                        "Interrupt IN endpoint {:#x}: received {} bytes",
-                        endpoint, len
                     );
                 }
                 Ok(buffer)

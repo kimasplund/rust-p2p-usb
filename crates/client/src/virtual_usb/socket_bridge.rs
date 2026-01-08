@@ -151,23 +151,17 @@ impl SocketBridge {
 
         // Use spawn_blocking for synchronous socket I/O
         tokio::task::spawn_blocking(move || {
-            // Use eprintln for immediate output (not buffered through tracing)
-            eprintln!(
-                "[SocketBridge] spawn_blocking closure entered for device {} port {}",
-                devid, port
-            );
-            info!(
+            debug!(
                 "Socket bridge thread started for device {} port {}",
                 devid, port
             );
 
             if let Err(e) = bridge.run_blocking(&rt) {
                 error!("Socket bridge error: {:#}", e);
-                eprintln!("[SocketBridge] Error: {:#}", e);
             }
 
-            eprintln!(
-                "[SocketBridge] spawn_blocking closure exiting for device {} port {}",
+            debug!(
+                "Socket bridge thread exiting for device {} port {}",
                 devid, port
             );
         });
@@ -223,27 +217,12 @@ impl SocketBridge {
             // Handle the message based on type
             match message {
                 UsbIpMessage::Submit { header, cmd, data } => {
-                    eprintln!(
-                        "[SocketBridge] Received CMD_SUBMIT: seqnum={}, ep={}, direction={}, transfer_len={}, interval={}, setup={:02x?}",
-                        header.seqnum,
-                        header.ep,
-                        header.direction,
-                        cmd.transfer_buffer_length,
-                        cmd.interval,
-                        cmd.setup
+                    trace!(
+                        "Received CMD_SUBMIT: seqnum={}, ep={}, direction={}, len={}",
+                        header.seqnum, header.ep, header.direction, cmd.transfer_buffer_length
                     );
-                    debug!(
-                        "Received CMD_SUBMIT: seqnum={}, ep={}, direction={}",
-                        header.seqnum, header.ep, header.direction
-                    );
-                    match self.handle_cmd_submit_blocking(rt, header, cmd, data) {
-                        Ok(()) => {
-                            eprintln!("[SocketBridge] CMD_SUBMIT handled successfully");
-                        }
-                        Err(e) => {
-                            eprintln!("[SocketBridge] CMD_SUBMIT error: {:#}", e);
-                            error!("Failed to handle CMD_SUBMIT: {:#}", e);
-                        }
+                    if let Err(e) = self.handle_cmd_submit_blocking(rt, header, cmd, data) {
+                        error!("Failed to handle CMD_SUBMIT: {:#}", e);
                     }
                 }
                 UsbIpMessage::Unlink { header, cmd } => {
@@ -271,58 +250,19 @@ impl SocketBridge {
             .lock()
             .map_err(|e| anyhow!("Failed to lock socket: {}", e))?;
 
-        eprintln!(
-            "[SocketBridge] Waiting to read from socket for device {} port {} (blocking)",
-            self.devid, self.port
-        );
-        debug!(
-            "Attempting to read from socket for device {} port {}",
+        trace!(
+            "Waiting to read from socket for device {} port {}",
             self.devid, self.port
         );
 
         // Set a read timeout so we can detect if kernel stops sending
         socket.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
-        eprintln!("[SocketBridge] Set 10-second read timeout");
 
         // Read header (20 bytes)
         let mut header_buf = vec![0u8; UsbIpHeader::SIZE];
-        eprintln!(
-            "[SocketBridge] Calling read_exact for {} bytes...",
-            UsbIpHeader::SIZE
-        );
-        match socket.read_exact(&mut header_buf) {
-            Ok(()) => {
-                eprintln!(
-                    "[SocketBridge] Successfully read {} bytes for device {} port {}",
-                    header_buf.len(),
-                    self.devid,
-                    self.port
-                );
-                debug!(
-                    "Successfully read {} bytes for device {} port {}",
-                    header_buf.len(),
-                    self.devid,
-                    self.port
-                );
-            }
-            Err(e) => {
-                eprintln!(
-                    "[SocketBridge] Read failed for device {} port {}: kind={:?}, error={}",
-                    self.devid,
-                    self.port,
-                    e.kind(),
-                    e
-                );
-                debug!(
-                    "Read failed for device {} port {}: kind={:?}, error={}",
-                    self.devid,
-                    self.port,
-                    e.kind(),
-                    e
-                );
-                return Err(anyhow!("Failed to read USB/IP header: {}", e));
-            }
-        }
+        socket
+            .read_exact(&mut header_buf)
+            .map_err(|e| anyhow!("Failed to read USB/IP header: {}", e))?;
 
         debug!(
             "Read header bytes: {:02x?} (first 16 bytes)",
@@ -465,8 +405,8 @@ impl SocketBridge {
         // This commonly happens with GET_CONFIG_DESCRIPTOR where kernel asks for 9 bytes
         // (to read wTotalLength) but device returns the full descriptor.
         if header.direction == 1 && converted.data.len() > max_data_len {
-            eprintln!(
-                "[SocketBridge] Clamping response data from {} to {} bytes (kernel buffer size)",
+            trace!(
+                "Clamping response data from {} to {} bytes (kernel buffer size)",
                 converted.data.len(),
                 max_data_len
             );
@@ -524,23 +464,12 @@ impl SocketBridge {
         let mut header_buf = Vec::with_capacity(UsbIpHeader::SIZE);
         header.write_to(&mut header_buf)?;
 
-        eprintln!(
-            "[SocketBridge] Sending RET_SUBMIT: seqnum={}, devid={}, status={}, actual_length={}, data_len={}, iso_packets={}",
+        trace!(
+            "RET_SUBMIT: seqnum={}, status={}, actual_length={}, data_len={}",
             request_header.seqnum,
-            request_header.devid,
             ret.status,
             ret.actual_length,
-            data.len(),
-            iso_packets.len()
-        );
-        debug!(
-            "Writing RET_SUBMIT header: command={:#06x}, seqnum={}, devid={}, direction={}, ep={}, header_bytes={:02x?}",
-            header.command,
-            header.seqnum,
-            header.devid,
-            header.direction,
-            header.ep,
-            &header_buf[..16.min(header_buf.len())]
+            data.len()
         );
 
         socket.write_all(&header_buf)?;
@@ -548,17 +477,6 @@ impl SocketBridge {
         // Write RET_SUBMIT payload - pre-allocate with exact size
         let mut ret_buf = Vec::with_capacity(UsbIpRetSubmit::SIZE);
         ret.write_to(&mut ret_buf)?;
-
-        debug!(
-            "Writing RET_SUBMIT payload: status={}, actual_length={}, start_frame={}, number_of_packets={}, error_count={}, ret_bytes={:02x?}",
-            ret.status,
-            ret.actual_length,
-            ret.start_frame,
-            ret.number_of_packets,
-            ret.error_count,
-            &ret_buf[..20.min(ret_buf.len())]
-        );
-
         socket.write_all(&ret_buf)?;
 
         // USB/IP header is always 48 bytes (20 header + 28 union payload)
@@ -574,49 +492,15 @@ impl SocketBridge {
             iso_packet.write_to(&mut iso_buf)?;
         }
         if !iso_buf.is_empty() {
-            debug!(
-                "Writing {} ISO packet descriptors ({} bytes)",
-                iso_packets.len(),
-                iso_buf.len()
-            );
             socket.write_all(&iso_buf)?;
         }
 
         // Write response data if any
         if !data.is_empty() {
-            debug!("Writing RET_SUBMIT data: {} bytes", data.len());
             socket.write_all(&data)?;
         }
 
         socket.flush()?;
-
-        let total_len =
-            header_buf.len() + ret_buf.len() + RET_SUBMIT_PADDING + iso_buf.len() + data.len();
-        eprintln!(
-            "[SocketBridge] RET_SUBMIT sent and flushed for seqnum={}, total_bytes={} (header={}, ret={}, padding={}, iso={}, data={})",
-            request_header.seqnum,
-            total_len,
-            header_buf.len(),
-            ret_buf.len(),
-            RET_SUBMIT_PADDING,
-            iso_buf.len(),
-            data.len()
-        );
-        eprintln!("[SocketBridge] RET_SUBMIT header hex: {:02x?}", &header_buf);
-        eprintln!("[SocketBridge] RET_SUBMIT payload hex: {:02x?}", &ret_buf);
-        if !iso_buf.is_empty() {
-            eprintln!(
-                "[SocketBridge] RET_SUBMIT ISO packets hex: {:02x?}",
-                &iso_buf[..iso_buf.len().min(64)]
-            );
-        }
-        if !data.is_empty() {
-            eprintln!(
-                "[SocketBridge] RET_SUBMIT data hex: {:02x?}",
-                &data[..data.len().min(64)]
-            );
-        }
-
         Ok(())
     }
 

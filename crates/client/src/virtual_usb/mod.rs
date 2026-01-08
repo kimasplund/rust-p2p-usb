@@ -75,6 +75,7 @@ pub mod macos;
 pub mod windows;
 
 pub mod device;
+pub mod interrupt_receive_buffer;
 
 // Re-export public types for internal use
 #[allow(unused_imports)]

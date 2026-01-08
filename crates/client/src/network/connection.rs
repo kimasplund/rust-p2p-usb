@@ -40,6 +40,14 @@ pub enum DeviceNotification {
         device_info: Option<DeviceInfo>,
         reason: protocol::DeviceStatusChangeReason,
     },
+    /// Interrupt data received (for proactive HID streaming)
+    InterruptData {
+        handle: DeviceHandle,
+        endpoint: u8,
+        sequence: u64,
+        data: Vec<u8>,
+        timestamp_us: u64,
+    },
 }
 
 /// Connection state
@@ -334,6 +342,26 @@ impl ServerConnection {
                         }
                     }
                 }
+            }
+            MessagePayload::InterruptData {
+                handle,
+                endpoint,
+                sequence,
+                data,
+                timestamp_us,
+            } => {
+                // High-frequency HID data - use trace level to avoid log spam
+                tracing::trace!(
+                    "Received interrupt data: handle={}, ep=0x{:02x}, seq={}, len={}",
+                    handle.0, endpoint, sequence, data.len()
+                );
+                let _ = tx.send(DeviceNotification::InterruptData {
+                    handle,
+                    endpoint,
+                    sequence,
+                    data,
+                    timestamp_us,
+                });
             }
             _ => {
                 warn!("Unexpected notification payload: {:?}", payload);

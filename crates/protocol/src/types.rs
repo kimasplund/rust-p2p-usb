@@ -701,6 +701,44 @@ pub enum UnlockResult {
     Error { message: String },
 }
 
+/// Information about an active interrupt stream
+///
+/// Returned when a client successfully starts interrupt streaming.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterruptStreamInfo {
+    /// Endpoint address
+    pub endpoint: u8,
+    /// Actual buffer size allocated on server
+    pub buffer_size: u32,
+    /// Maximum report size for this endpoint
+    pub max_report_size: u16,
+    /// Polling interval in milliseconds
+    pub poll_interval_ms: u8,
+    /// Starting sequence number
+    pub start_sequence: u64,
+}
+
+/// Statistics from an interrupt stream
+///
+/// Returned when a client stops interrupt streaming.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterruptStreamStats {
+    /// Total reports captured
+    pub total_reports: u64,
+    /// Reports successfully sent to client
+    pub reports_sent: u64,
+    /// Reports dropped due to buffer overflow
+    pub reports_dropped: u64,
+    /// Reports acknowledged by client
+    pub reports_acked: u64,
+    /// Last sequence number sent
+    pub last_sequence: u64,
+    /// Average latency from capture to send (microseconds)
+    pub avg_latency_us: u64,
+    /// Stream duration in milliseconds
+    pub duration_ms: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

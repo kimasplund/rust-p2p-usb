@@ -620,6 +620,22 @@ async fn handle_notifications(
                     device_info.as_ref().map(|d| &d.id)
                 );
             }
+            Ok(DeviceNotification::InterruptData {
+                handle,
+                endpoint,
+                sequence,
+                data,
+                timestamp_us: _,
+            }) => {
+                // Interrupt data is received from server's proactive streaming
+                // This will be stored in the InterruptReceiveManager for SocketBridge to consume
+                // For now, log at trace level since this is high-frequency
+                tracing::trace!(
+                    "Received streamed interrupt data: handle={}, ep=0x{:02x}, seq={}, len={}",
+                    handle.0, endpoint, sequence, data.len()
+                );
+                // TODO: Store in InterruptReceiveManager once wired up
+            }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                 warn!("Missed {} device notifications", n);
             }

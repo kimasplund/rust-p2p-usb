@@ -10,8 +10,8 @@
 use crate::types::{
     AggregatedNotification, AttachError, DetachError, DeviceHandle, DeviceId, DeviceInfo,
     DeviceRemovalReason, DeviceSharingStatus, DeviceStatusChangeReason, ForceDetachReason,
-    LockResult, ProtocolMetrics, QueuePositionUpdate, ServerMetricsSummary, SharingMode,
-    UnlockResult, UsbRequest, UsbResponse,
+    InterruptStreamInfo, InterruptStreamStats, LockResult, ProtocolMetrics, QueuePositionUpdate,
+    ServerMetricsSummary, SharingMode, UnlockResult, UsbRequest, UsbResponse,
 };
 use crate::version::ProtocolVersion;
 use serde::{Deserialize, Serialize};
@@ -259,6 +259,82 @@ pub enum MessagePayload {
         handle: DeviceHandle,
         /// Current sharing mode
         sharing_mode: SharingMode,
+    },
+
+    // Interrupt data streaming (proactive push from server)
+    /// Proactive interrupt data from server (server -> client)
+    ///
+    /// Server streams interrupt reports as they arrive, without waiting
+    /// for client requests. This eliminates network round-trip latency
+    /// for HID devices like keyboards, mice, and barcode scanners.
+    InterruptData {
+        /// Device handle this data belongs to
+        handle: DeviceHandle,
+        /// Endpoint address (e.g., 0x81 for EP1 IN)
+        endpoint: u8,
+        /// Sequence number for ordering and gap detection
+        sequence: u64,
+        /// Interrupt report data (typically 8 bytes for HID)
+        data: Vec<u8>,
+        /// Server timestamp in microseconds since epoch
+        timestamp_us: u64,
+    },
+
+    /// Acknowledgment for received interrupt data (client -> server)
+    ///
+    /// Client acknowledges receipt of interrupt data, allowing server
+    /// to manage buffer space and detect connection issues.
+    InterruptAck {
+        /// Device handle
+        handle: DeviceHandle,
+        /// Endpoint address being acknowledged
+        endpoint: u8,
+        /// Highest sequence number received in order
+        last_seq: u64,
+        /// Number of reports received since last ack
+        reports_received: u32,
+    },
+
+    /// Request to start interrupt streaming for an endpoint (client -> server)
+    ///
+    /// Client requests server to begin proactive streaming of interrupt
+    /// data for a specific endpoint. Server will start polling and pushing
+    /// InterruptData messages.
+    StartInterruptStreamRequest {
+        /// Device handle (must be attached)
+        handle: DeviceHandle,
+        /// Endpoint address to stream (e.g., 0x81)
+        endpoint: u8,
+        /// Suggested buffer size on server (server may choose different)
+        buffer_hint: u32,
+    },
+
+    /// Response to start interrupt stream request
+    StartInterruptStreamResponse {
+        /// Device handle
+        handle: DeviceHandle,
+        /// Endpoint address
+        endpoint: u8,
+        /// Whether streaming was started successfully
+        result: Result<InterruptStreamInfo, String>,
+    },
+
+    /// Request to stop interrupt streaming for an endpoint (client -> server)
+    StopInterruptStreamRequest {
+        /// Device handle
+        handle: DeviceHandle,
+        /// Endpoint address to stop streaming
+        endpoint: u8,
+    },
+
+    /// Response to stop interrupt stream request
+    StopInterruptStreamResponse {
+        /// Device handle
+        handle: DeviceHandle,
+        /// Endpoint address
+        endpoint: u8,
+        /// Statistics from the stopped stream
+        stats: Option<InterruptStreamStats>,
     },
 }
 

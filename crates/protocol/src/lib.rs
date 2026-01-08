@@ -62,9 +62,9 @@ pub use messages::{Message, MessagePayload};
 pub use types::{
     AggregatedNotification, AttachError, ClientMetrics, DetachError, DeviceHandle, DeviceId,
     DeviceInfo, DeviceMetrics, DeviceRemovalReason, DeviceSharingStatus, DeviceSpeed,
-    DeviceStatusChangeReason, ForceDetachReason, IsoPacketDescriptor, IsoPacketResult, LockResult,
-    ProtocolLatencyStats, ProtocolMetrics, QueuePositionUpdate, RequestId, ServerMetricsSummary,
-    SharingMode, SuperSpeedConfig, TransferResult, TransferType, UnlockResult, UsbError,
-    UsbRequest, UsbResponse,
+    DeviceStatusChangeReason, ForceDetachReason, InterruptStreamInfo, InterruptStreamStats,
+    IsoPacketDescriptor, IsoPacketResult, LockResult, ProtocolLatencyStats, ProtocolMetrics,
+    QueuePositionUpdate, RequestId, ServerMetricsSummary, SharingMode, SuperSpeedConfig,
+    TransferResult, TransferType, UnlockResult, UsbError, UsbRequest, UsbResponse,
 };
 pub use version::{CURRENT_VERSION, ProtocolVersion};

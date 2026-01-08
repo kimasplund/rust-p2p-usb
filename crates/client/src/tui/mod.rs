@@ -169,6 +169,10 @@ impl TuiRunner {
                         DeviceNotification::DeviceStatusChanged { device_id, device_info, .. } => {
                              self.handle_action(AppAction::DeviceStatusChanged(endpoint_id, device_id, device_info)).await?;
                         }
+                        DeviceNotification::InterruptData { .. } => {
+                            // Interrupt data is handled directly by SocketBridge, not TUI
+                            // This is high-frequency data that shouldn't be processed here
+                        }
                     }
                 }
                 // Process any pending messages from async tasks

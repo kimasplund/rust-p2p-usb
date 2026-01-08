@@ -149,6 +149,19 @@ impl UsbDevice {
 
         debug!("Opened device {:?}", self.id);
 
+        // Enable auto-detach kernel driver feature
+        // This prevents the kernel from reattaching drivers while we have the device claimed
+        // Without this, HID devices may have their kernel drivers reattached, causing
+        // input to go to both the local system AND through USB/IP
+        if let Err(e) = handle.set_auto_detach_kernel_driver(true) {
+            warn!(
+                "Failed to enable auto-detach kernel driver for device {:?}: {} (continuing anyway)",
+                self.id, e
+            );
+        } else {
+            debug!("Enabled auto-detach kernel driver for device {:?}", self.id);
+        }
+
         // Get the number of interfaces from the active configuration
         let num_interfaces = match self.device.active_config_descriptor() {
             Ok(config) => config.num_interfaces(),

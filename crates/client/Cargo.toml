@@ -38,3 +38,4 @@ byteorder.workspace = true
 [dev-dependencies]
 rand.workspace = true
 tempfile = "3.24"
+proptest = "1.4"

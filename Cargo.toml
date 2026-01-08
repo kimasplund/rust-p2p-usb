@@ -23,6 +23,9 @@ postcard = { version = "1.0", features = ["alloc"] }
 bytes = "1.8"
 byteorder = "1.5"
 
+# Data integrity (hardware-accelerated CRC32C)
+crc32fast = "1.4"
+
 # Error handling
 thiserror = "2.0"
 anyhow = "1.0"

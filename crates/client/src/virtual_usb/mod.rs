@@ -25,6 +25,9 @@ use std::sync::Arc;
 
 use crate::network::device_proxy::DeviceProxy;
 
+// Re-export interrupt receive buffer types
+pub use interrupt_receive_buffer::{AggregatedIntegrityMetrics, InterruptReceiveManager};
+
 /// Unique device identifier across all connected servers
 ///
 /// Since DeviceHandle is server-assigned and different servers may assign
@@ -95,6 +98,10 @@ pub struct VirtualUsbManager {
 
     #[cfg(target_os = "windows")]
     inner: windows::WindowsVirtualUsbManager,
+
+    /// Interrupt data receive buffer manager
+    /// Handles integrity verification and buffering of streamed interrupt data
+    interrupt_manager: Arc<InterruptReceiveManager>,
 }
 
 impl VirtualUsbManager {
@@ -106,10 +113,14 @@ impl VirtualUsbManager {
     /// - **macOS**: Not implemented
     /// - **Windows**: Not implemented
     pub async fn new() -> Result<Self> {
+        // Default buffer size of 64 reports per endpoint
+        let interrupt_manager = Arc::new(InterruptReceiveManager::new(64));
+
         #[cfg(target_os = "linux")]
         {
             Ok(Self {
                 inner: linux::LinuxVirtualUsbManager::new().await?,
+                interrupt_manager,
             })
         }
 
@@ -117,6 +128,7 @@ impl VirtualUsbManager {
         {
             Ok(Self {
                 inner: macos::MacOsVirtualUsbManager::new().await?,
+                interrupt_manager,
             })
         }
 
@@ -124,6 +136,7 @@ impl VirtualUsbManager {
         {
             Ok(Self {
                 inner: windows::WindowsVirtualUsbManager::new().await?,
+                interrupt_manager,
             })
         }
     }
@@ -225,5 +238,62 @@ impl VirtualUsbManager {
     #[cfg(not(target_os = "linux"))]
     pub async fn get_all_attached_devices(&self) -> Vec<GlobalDeviceId> {
         Vec::new()
+    }
+
+    /// Process incoming interrupt data from the server
+    ///
+    /// Verifies checksum and stores in the receive buffer.
+    /// Returns (stored_ok, checksum_valid) tuple.
+    ///
+    /// - stored_ok: true if data was stored (buffer active and checksum valid)
+    /// - checksum_valid: true if checksum verification passed
+    pub fn process_interrupt_data(
+        &self,
+        device_handle: u32,
+        endpoint: u8,
+        sequence: u64,
+        data: Vec<u8>,
+        timestamp_us: u64,
+        checksum: u32,
+    ) -> (bool, bool) {
+        use protocol::integrity::verify_interrupt_checksum;
+
+        // First, verify checksum before delegating to manager
+        let checksum_valid =
+            verify_interrupt_checksum(sequence, endpoint, &data, timestamp_us, checksum);
+
+        if !checksum_valid {
+            // Don't even try to store corrupted data
+            return (false, false);
+        }
+
+        // Process through the manager (creates buffer if needed)
+        let result = self.interrupt_manager.process_interrupt_data(
+            device_handle,
+            endpoint,
+            sequence,
+            data,
+            timestamp_us,
+            checksum,
+        );
+
+        // If we got Some(_), the data was processed
+        // The stored_ok depends on whether the buffer was active
+        let stored_ok = result.is_some();
+
+        (stored_ok, checksum_valid)
+    }
+
+    /// Get aggregated integrity metrics across all devices
+    pub fn get_integrity_metrics(&self) -> AggregatedIntegrityMetrics {
+        // The InterruptReceiveManager doesn't expose per-device iteration yet,
+        // so we return empty metrics for now. This can be enhanced later.
+        // The actual metrics are tracked per-endpoint in the buffer stats.
+        AggregatedIntegrityMetrics::new()
+    }
+
+    /// Get the interrupt receive manager (for advanced use cases)
+    pub fn interrupt_manager(&self) -> &Arc<InterruptReceiveManager> {
+        &self.interrupt_manager
     }
 }

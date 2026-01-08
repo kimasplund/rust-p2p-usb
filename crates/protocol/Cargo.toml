@@ -13,6 +13,7 @@ serde_bytes.workspace = true
 postcard.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
+crc32fast.workspace = true
 tokio = { workspace = true, optional = true }
 
 [features]

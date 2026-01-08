@@ -47,6 +47,8 @@ pub enum DeviceNotification {
         sequence: u64,
         data: Vec<u8>,
         timestamp_us: u64,
+        /// CRC32C checksum for integrity verification
+        checksum: u32,
     },
 }
 
@@ -349,11 +351,12 @@ impl ServerConnection {
                 sequence,
                 data,
                 timestamp_us,
+                checksum,
             } => {
                 // High-frequency HID data - use trace level to avoid log spam
                 tracing::trace!(
-                    "Received interrupt data: handle={}, ep=0x{:02x}, seq={}, len={}",
-                    handle.0, endpoint, sequence, data.len()
+                    "Received interrupt data: handle={}, ep=0x{:02x}, seq={}, len={}, crc=0x{:08x}",
+                    handle.0, endpoint, sequence, data.len(), checksum
                 );
                 let _ = tx.send(DeviceNotification::InterruptData {
                     handle,
@@ -361,6 +364,7 @@ impl ServerConnection {
                     sequence,
                     data,
                     timestamp_us,
+                    checksum,
                 });
             }
             _ => {

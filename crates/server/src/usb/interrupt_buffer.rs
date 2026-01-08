@@ -38,6 +38,7 @@
 //! - Client acknowledges received sequences for flow control
 //! - If buffer overflows, oldest unacknowledged data is dropped with warning
 
+use protocol::integrity::compute_interrupt_checksum;
 use protocol::DeviceId;
 use rusb::{Context, DeviceHandle};
 use std::collections::HashMap;
@@ -54,7 +55,7 @@ pub const MAX_BUFFERED_REPORTS: usize = 64;
 /// Timeout for USB interrupt reads (short for responsive polling)
 const USB_READ_TIMEOUT_MS: u64 = 50;
 
-/// A single buffered interrupt report with metadata
+/// A single buffered interrupt report with metadata and integrity checksum
 #[derive(Debug, Clone)]
 pub struct InterruptReport {
     /// Sequence number for ordering and verification
@@ -65,21 +66,27 @@ pub struct InterruptReport {
     pub data: Vec<u8>,
     /// Timestamp when this report was read from USB (microseconds since epoch)
     pub timestamp_us: u64,
+    /// CRC32C checksum for integrity verification
+    pub checksum: u32,
 }
 
 impl InterruptReport {
-    /// Create a new interrupt report
+    /// Create a new interrupt report with computed checksum
     pub fn new(seq: u64, endpoint: u8, data: Vec<u8>) -> Self {
         let timestamp_us = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_micros() as u64)
             .unwrap_or(0);
 
+        // Compute CRC32C checksum for integrity verification
+        let checksum = compute_interrupt_checksum(seq, endpoint, &data, timestamp_us);
+
         Self {
             seq,
             endpoint,
             data,
             timestamp_us,
+            checksum,
         }
     }
 
@@ -90,6 +97,12 @@ impl InterruptReport {
             .map(|d| d.as_micros() as u64)
             .unwrap_or(0);
         now.saturating_sub(self.timestamp_us)
+    }
+
+    /// Verify the integrity of this report
+    pub fn verify(&self) -> bool {
+        let computed = compute_interrupt_checksum(self.seq, self.endpoint, &self.data, self.timestamp_us);
+        computed == self.checksum
     }
 }
 

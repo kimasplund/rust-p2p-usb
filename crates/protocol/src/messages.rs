@@ -275,9 +275,28 @@ pub enum MessagePayload {
         /// Sequence number for ordering and gap detection
         sequence: u64,
         /// Interrupt report data (typically 8 bytes for HID)
+        #[serde(with = "serde_bytes")]
         data: Vec<u8>,
         /// Server timestamp in microseconds since epoch
         timestamp_us: u64,
+        /// CRC32C checksum of (sequence || endpoint || data || timestamp_us)
+        /// Provides defense-in-depth integrity verification beyond QUIC transport
+        checksum: u32,
+    },
+
+    /// Negative acknowledgment requesting retransmission (client -> server)
+    ///
+    /// Client requests retransmission of missing sequence numbers.
+    /// Used for gap recovery when packet loss is detected.
+    InterruptNack {
+        /// Device handle
+        handle: DeviceHandle,
+        /// Endpoint address
+        endpoint: u8,
+        /// Missing sequence numbers
+        missing_sequences: Vec<u64>,
+        /// Last contiguous sequence received
+        last_contiguous_seq: u64,
     },
 
     /// Acknowledgment for received interrupt data (client -> server)

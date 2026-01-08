@@ -625,16 +625,31 @@ async fn handle_notifications(
                 endpoint,
                 sequence,
                 data,
-                timestamp_us: _,
+                timestamp_us,
+                checksum,
             }) => {
                 // Interrupt data is received from server's proactive streaming
-                // This will be stored in the InterruptReceiveManager for SocketBridge to consume
-                // For now, log at trace level since this is high-frequency
-                tracing::trace!(
-                    "Received streamed interrupt data: handle={}, ep=0x{:02x}, seq={}, len={}",
-                    handle.0, endpoint, sequence, data.len()
+                // Process through InterruptReceiveManager for integrity verification and buffering
+                let (stored, checksum_valid) = virtual_usb.process_interrupt_data(
+                    handle.0,
+                    endpoint,
+                    sequence,
+                    data.clone(),
+                    timestamp_us,
+                    checksum,
                 );
-                // TODO: Store in InterruptReceiveManager once wired up
+
+                if !checksum_valid {
+                    warn!(
+                        "Interrupt data checksum mismatch: handle={}, ep=0x{:02x}, seq={}, crc=0x{:08x}",
+                        handle.0, endpoint, sequence, checksum
+                    );
+                }
+
+                tracing::trace!(
+                    "Received streamed interrupt data: handle={}, ep=0x{:02x}, seq={}, len={}, stored={}, valid={}",
+                    handle.0, endpoint, sequence, data.len(), stored, checksum_valid
+                );
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                 warn!("Missed {} device notifications", n);

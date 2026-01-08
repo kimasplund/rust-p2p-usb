@@ -46,6 +46,7 @@
 
 pub mod codec;
 pub mod error;
+pub mod integrity;
 pub mod messages;
 pub mod types;
 pub mod version;

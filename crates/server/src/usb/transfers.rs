@@ -234,12 +234,89 @@ fn execute_bulk_transfer(
                 );
                 Ok(Vec::new())
             }
+            Err(rusb::Error::Pipe) => {
+                // Endpoint stalled - clear the stall and retry once
+                // This can happen for USB mass storage after SCSI errors
+                warn!(
+                    "Bulk IN pipe error on endpoint {:#x}, clearing stall and retrying",
+                    endpoint
+                );
+                if let Err(clear_err) = handle.clear_halt(endpoint) {
+                    warn!(
+                        "Failed to clear halt on endpoint {:#x}: {:?}",
+                        endpoint, clear_err
+                    );
+                    return TransferResult::Error {
+                        error: UsbError::Pipe,
+                    };
+                }
+                // Retry the transfer after clearing stall
+                let mut buffer = vec![0u8; transfer_size];
+                match handle.read_bulk(endpoint, &mut buffer, timeout) {
+                    Ok(len) => {
+                        buffer.truncate(len);
+                        debug!(
+                            "Bulk IN succeeded after clearing stall on endpoint {:#x}",
+                            endpoint
+                        );
+                        Ok(buffer)
+                    }
+                    Err(rusb::Error::Timeout) | Err(rusb::Error::Io) => {
+                        trace!(
+                            "Bulk IN timeout/io after clear stall on endpoint {:#x}",
+                            endpoint
+                        );
+                        Ok(Vec::new())
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Bulk IN failed even after clearing stall: {:?}",
+                            e
+                        );
+                        Err(map_rusb_error(e))
+                    }
+                }
+            }
             Err(e) => Err(map_rusb_error(e)),
         }
     } else {
         // OUT transfer: write to device
         match handle.write_bulk(endpoint, &data, timeout) {
             Ok(_len) => Ok(Vec::new()),
+            Err(rusb::Error::Pipe) => {
+                // Endpoint stalled - clear the stall and retry once
+                // This is common for USB mass storage during SCSI command sequences
+                warn!(
+                    "Bulk OUT pipe error on endpoint {:#x}, clearing stall and retrying",
+                    endpoint
+                );
+                if let Err(clear_err) = handle.clear_halt(endpoint) {
+                    warn!(
+                        "Failed to clear halt on endpoint {:#x}: {:?}",
+                        endpoint, clear_err
+                    );
+                    return TransferResult::Error {
+                        error: UsbError::Pipe,
+                    };
+                }
+                // Retry the transfer after clearing stall
+                match handle.write_bulk(endpoint, &data, timeout) {
+                    Ok(_len) => {
+                        debug!(
+                            "Bulk OUT succeeded after clearing stall on endpoint {:#x}",
+                            endpoint
+                        );
+                        Ok(Vec::new())
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Bulk OUT failed even after clearing stall: {:?}",
+                            e
+                        );
+                        Err(map_rusb_error(e))
+                    }
+                }
+            }
             Err(e) => Err(map_rusb_error(e)),
         }
     };

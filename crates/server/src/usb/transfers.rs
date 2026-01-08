@@ -283,6 +283,14 @@ pub fn optimal_bulk_buffer_size(speed: DeviceSpeed, requested_size: usize) -> us
 /// Interrupt transfers are used for low-latency devices (HID, etc.).
 /// For IN transfers, data vec length specifies the buffer size.
 /// For OUT transfers, data vec contains the data to send.
+///
+/// # USB/IP Polling Behavior
+///
+/// USB/IP clients continuously submit interrupt IN URBs to poll for data.
+/// For HID devices (keyboards, mice, barcode scanners), we need to wait long
+/// enough to catch rapid sequences of data (e.g., multiple keystrokes from
+/// scanning a barcode). A short timeout causes missed data because each
+/// keystroke generates key-down/key-up reports in quick succession.
 fn execute_interrupt_transfer(
     handle: &mut DeviceHandle<rusb::Context>,
     endpoint: u8,
@@ -291,16 +299,21 @@ fn execute_interrupt_transfer(
 ) -> TransferResult {
     let is_in = (endpoint & 0x80) != 0;
 
-    // For interrupt IN transfers (like printer status reads), use a short timeout
-    // since the device may not have data available. This prevents blocking
-    // and allows USB/IP clients to continue without long waits.
+    // For interrupt IN transfers, use a reasonable timeout that allows HID devices
+    // to respond. USB/IP clients continuously re-submit these transfers, so we
+    // want to balance responsiveness (not blocking too long if no data) with
+    // catching rapid sequences of HID data (multiple keystrokes).
+    //
+    // 1000ms is a good balance - long enough to catch rapid HID sequences,
+    // short enough to not block indefinitely. The client will re-submit
+    // immediately after receiving a response.
     let timeout = if is_in {
-        Duration::from_millis(100.min(timeout_ms as u64))
+        Duration::from_millis(1000.min(timeout_ms as u64))
     } else {
         Duration::from_millis(timeout_ms as u64)
     };
 
-    debug!(
+    trace!(
         "Interrupt transfer: endpoint={:#x}, data_len={}, timeout={}ms, is_in={}",
         endpoint,
         data.len(),
@@ -314,14 +327,29 @@ fn execute_interrupt_transfer(
         match handle.read_interrupt(endpoint, &mut buffer, timeout) {
             Ok(len) => {
                 buffer.truncate(len);
+                if len > 0 {
+                    debug!(
+                        "Interrupt IN endpoint {:#x}: received {} bytes",
+                        endpoint, len
+                    );
+                }
                 Ok(buffer)
             }
-            Err(rusb::Error::Timeout) | Err(rusb::Error::Io) => {
-                // For interrupt IN, timeout/IO error is normal - device has no data available
-                // Return empty success instead of error to avoid breaking USB/IP clients
-                // Printers often return IO error when no status data is pending
-                debug!(
-                    "Interrupt IN timeout/io on endpoint {:#x} - returning empty (no data available)",
+            Err(rusb::Error::Timeout) => {
+                // Timeout is normal for interrupt IN - device has no data available yet.
+                // Return empty success - USB/IP client will re-submit the URB.
+                // This is the expected behavior for HID polling.
+                trace!(
+                    "Interrupt IN timeout on endpoint {:#x} - no data available",
+                    endpoint
+                );
+                Ok(Vec::new())
+            }
+            Err(rusb::Error::Io) => {
+                // IO error can mean the device is busy or temporarily unavailable.
+                // Return empty to allow retry rather than failing the transfer.
+                trace!(
+                    "Interrupt IN IO error on endpoint {:#x} - returning empty for retry",
                     endpoint
                 );
                 Ok(Vec::new())
@@ -338,7 +366,9 @@ fn execute_interrupt_transfer(
 
     match result {
         Ok(data) => {
-            debug!("Interrupt transfer succeeded: {} bytes", data.len());
+            if !data.is_empty() {
+                debug!("Interrupt transfer succeeded: {} bytes", data.len());
+            }
             TransferResult::Success { data }
         }
         Err(error) => {

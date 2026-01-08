@@ -21,6 +21,8 @@ pub struct UsbDevice {
     speed: DeviceSpeed,
     /// Transfer configuration based on device speed
     transfer_config: SuperSpeedConfig,
+    /// Number of interfaces (cached when device is opened)
+    num_interfaces: u8,
 }
 
 impl UsbDevice {
@@ -48,6 +50,7 @@ impl UsbDevice {
             handle: None,
             speed,
             transfer_config,
+            num_interfaces: 0,
         })
     }
 
@@ -146,39 +149,53 @@ impl UsbDevice {
 
         debug!("Opened device {:?}", self.id);
 
-        // Detach kernel driver from interface 0 if active
-        // This is necessary because Linux kernel drivers (like usb-storage)
-        // will have claimed the interface, preventing us from accessing it
-        match handle.kernel_driver_active(0) {
-            Ok(true) => {
-                debug!(
-                    "Detaching kernel driver from interface 0 on device {:?}",
-                    self.id
-                );
-                if let Err(e) = handle.detach_kernel_driver(0) {
-                    warn!("Failed to detach kernel driver: {}", e);
-                    return Err(AttachError::Other {
-                        message: format!("Failed to detach kernel driver: {}", e),
-                    });
-                }
-            }
-            Ok(false) => {
-                debug!("No kernel driver active on interface 0");
-            }
+        // Get the number of interfaces from the active configuration
+        let num_interfaces = match self.device.active_config_descriptor() {
+            Ok(config) => config.num_interfaces(),
             Err(e) => {
-                // Some platforms don't support this operation, so just log and continue
-                debug!("Could not check kernel driver status: {}", e);
+                warn!("Failed to get config descriptor, assuming 1 interface: {}", e);
+                1
+            }
+        };
+        debug!("Device {:?} has {} interface(s)", self.id, num_interfaces);
+
+        // Detach kernel drivers from ALL interfaces
+        // This is necessary because Linux kernel drivers (like usbhid, usb-storage)
+        // will have claimed the interfaces, preventing us from accessing them
+        for iface in 0..num_interfaces {
+            match handle.kernel_driver_active(iface) {
+                Ok(true) => {
+                    debug!(
+                        "Detaching kernel driver from interface {} on device {:?}",
+                        iface, self.id
+                    );
+                    if let Err(e) = handle.detach_kernel_driver(iface) {
+                        warn!("Failed to detach kernel driver from interface {}: {}", iface, e);
+                        // Continue anyway - some interfaces may not need detachment
+                    }
+                }
+                Ok(false) => {
+                    debug!("No kernel driver active on interface {}", iface);
+                }
+                Err(e) => {
+                    // Some platforms don't support this operation, so just log and continue
+                    debug!("Could not check kernel driver status for interface {}: {}", iface, e);
+                }
             }
         }
 
-        // Claim interface 0 for our exclusive use
-        if let Err(e) = handle.claim_interface(0) {
-            warn!("Failed to claim interface 0: {}", e);
-            return Err(AttachError::Other {
-                message: format!("Failed to claim interface 0: {}", e),
-            });
+        // Claim all interfaces for our exclusive use
+        for iface in 0..num_interfaces {
+            if let Err(e) = handle.claim_interface(iface) {
+                warn!("Failed to claim interface {}: {}", iface, e);
+                // Continue anyway - some interfaces may not be claimable
+            } else {
+                debug!("Claimed interface {} on device {:?}", iface, self.id);
+            }
         }
-        debug!("Claimed interface 0 on device {:?}", self.id);
+
+        // Store number of interfaces for close()
+        self.num_interfaces = num_interfaces;
 
         self.handle = Some(handle);
         Ok(())
@@ -186,31 +203,38 @@ impl UsbDevice {
 
     /// Close the device
     ///
-    /// This will release the claimed interface and reattach the kernel driver
+    /// This will release all claimed interfaces and reattach kernel drivers
     /// to restore the device to normal kernel control.
     pub fn close(&mut self) {
         if let Some(handle) = self.handle.take() {
-            // Release interface 0 before closing
-            if let Err(e) = handle.release_interface(0) {
-                warn!("Failed to release interface 0: {}", e);
+            // Release all interfaces before closing
+            for iface in 0..self.num_interfaces {
+                if let Err(e) = handle.release_interface(iface) {
+                    warn!("Failed to release interface {}: {}", iface, e);
+                } else {
+                    debug!("Released interface {} on device {:?}", iface, self.id);
+                }
             }
 
-            // Reattach kernel driver to restore device to kernel control
+            // Reattach kernel drivers to restore device to kernel control
             // This allows the device to be used normally on the server again
             // after we're done sharing it via USB/IP
-            if let Err(e) = handle.attach_kernel_driver(0) {
-                // This may fail if no driver was attached originally, which is fine
-                debug!(
-                    "Could not reattach kernel driver (may not have been detached): {}",
-                    e
-                );
-            } else {
-                debug!(
-                    "Reattached kernel driver to interface 0 on device {:?}",
-                    self.id
-                );
+            for iface in 0..self.num_interfaces {
+                if let Err(e) = handle.attach_kernel_driver(iface) {
+                    // This may fail if no driver was attached originally, which is fine
+                    debug!(
+                        "Could not reattach kernel driver to interface {} (may not have been detached): {}",
+                        iface, e
+                    );
+                } else {
+                    debug!(
+                        "Reattached kernel driver to interface {} on device {:?}",
+                        iface, self.id
+                    );
+                }
             }
 
+            self.num_interfaces = 0;
             debug!("Closed device {:?}", self.id);
         }
     }

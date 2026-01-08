@@ -177,10 +177,11 @@ impl SocketBridge {
         self.running.store(false, Ordering::Release);
     }
 
-    /// Main bridge loop (blocking version)
+    /// Main bridge loop (concurrent version)
     ///
-    /// Runs in a spawn_blocking thread with synchronous socket I/O.
-    /// Uses the tokio runtime handle to call async DeviceProxy methods.
+    /// Runs in a spawn_blocking thread with synchronous socket I/O for reads.
+    /// Spawns async tasks for each CMD_SUBMIT to process them concurrently.
+    /// This eliminates the round-trip latency bottleneck for HID devices.
     fn run_blocking(&self, rt: &tokio::runtime::Handle) -> Result<()> {
         info!(
             "Starting USB/IP socket bridge for device {} on port {}",
@@ -221,15 +222,35 @@ impl SocketBridge {
                         "Received CMD_SUBMIT: seqnum={}, ep={}, direction={}, len={}",
                         header.seqnum, header.ep, header.direction, cmd.transfer_buffer_length
                     );
-                    if let Err(e) = self.handle_cmd_submit_blocking(rt, header, cmd, data) {
-                        error!("Failed to handle CMD_SUBMIT: {:#}", e);
-                    }
+
+                    // Spawn async task to handle CMD_SUBMIT concurrently
+                    // This allows multiple transfers to be in-flight simultaneously,
+                    // which is crucial for HID devices where key-up must follow key-down quickly
+                    let device_proxy = self.device_proxy.clone();
+                    let socket = self.socket.clone();
+                    let pending_transfers = self.pending_transfers.clone();
+                    let devid = self.devid;
+
+                    rt.spawn(async move {
+                        if let Err(e) = Self::handle_cmd_submit_async(
+                            device_proxy,
+                            socket,
+                            pending_transfers,
+                            devid,
+                            header,
+                            cmd,
+                            data,
+                        ).await {
+                            error!("Failed to handle CMD_SUBMIT: {:#}", e);
+                        }
+                    });
                 }
                 UsbIpMessage::Unlink { header, cmd } => {
                     trace!(
                         "Received CMD_UNLINK: seqnum={}, seqnum_unlink={}",
                         header.seqnum, cmd.seqnum_unlink
                     );
+                    // CMD_UNLINK is quick and should be processed immediately
                     if let Err(e) = self.handle_cmd_unlink_blocking(rt, header, cmd) {
                         error!("Failed to handle CMD_UNLINK: {:#}", e);
                     }
@@ -238,6 +259,166 @@ impl SocketBridge {
         }
 
         info!("Socket bridge stopped for port {}", self.port);
+        Ok(())
+    }
+
+    /// Handle CMD_SUBMIT asynchronously
+    ///
+    /// This is the async version that runs in spawned tasks for concurrent processing.
+    async fn handle_cmd_submit_async(
+        device_proxy: Arc<DeviceProxy>,
+        socket: Arc<std::sync::Mutex<UnixStream>>,
+        pending_transfers: Arc<RwLock<HashMap<u32, oneshot::Sender<()>>>>,
+        devid: u32,
+        header: UsbIpHeader,
+        cmd: UsbIpCmdSubmit,
+        data: Vec<u8>,
+    ) -> Result<()> {
+        let seqnum = header.seqnum;
+        let max_data_len = cmd.transfer_buffer_length as usize;
+
+        // Create cancellation channel for this transfer
+        let (cancel_tx, _cancel_rx) = oneshot::channel::<()>();
+
+        // Register this transfer as pending (for CMD_UNLINK support)
+        {
+            let mut pending = pending_transfers.write().await;
+            pending.insert(seqnum, cancel_tx);
+            trace!(
+                "Registered pending transfer: seqnum={}, total_pending={}",
+                seqnum,
+                pending.len()
+            );
+        }
+
+        // Convert USB/IP to our protocol
+        let usb_request = usbip_to_usb_request(&device_proxy, &header, &cmd, data).await?;
+
+        trace!(
+            "Submitting USB request: seqnum={}, id={}",
+            seqnum, usb_request.id.0
+        );
+
+        // Submit to device proxy (async)
+        let result = device_proxy.submit_transfer(usb_request).await;
+
+        // Remove from pending transfers
+        {
+            let mut pending = pending_transfers.write().await;
+            pending.remove(&seqnum);
+            trace!(
+                "Removed pending transfer: seqnum={}, remaining={}",
+                seqnum,
+                pending.len()
+            );
+        }
+
+        // Handle transfer result
+        let usb_response = result.context("Failed to submit transfer to device proxy")?;
+
+        // Convert response back to USB/IP
+        let is_isochronous = cmd.number_of_packets > 0;
+        let mut converted = if is_isochronous {
+            usb_response_to_usbip_full(&usb_response)
+        } else {
+            let (ret, data) = usb_response_to_usbip(&usb_response);
+            super::usbip_protocol::UsbIpConvertedResponse {
+                ret,
+                data,
+                iso_packets: Vec::new(),
+            }
+        };
+
+        // Clamp response data to kernel's requested buffer size
+        if header.direction == 1 && converted.data.len() > max_data_len {
+            trace!(
+                "Clamping response data from {} to {} bytes (kernel buffer size)",
+                converted.data.len(),
+                max_data_len
+            );
+            converted.data.truncate(max_data_len);
+            converted.ret.actual_length = max_data_len as u32;
+        }
+
+        trace!(
+            "Completed USB request: seqnum={}, status={}, len={}, iso_packets={}",
+            seqnum,
+            converted.ret.status,
+            converted.ret.actual_length,
+            converted.iso_packets.len()
+        );
+
+        // Send RET_SUBMIT back to vhci_hcd
+        Self::send_ret_submit_async(
+            socket,
+            devid,
+            &header,
+            converted.ret,
+            converted.data,
+            converted.iso_packets,
+        )?;
+
+        Ok(())
+    }
+
+    /// Send RET_SUBMIT back to vhci_hcd (for async handler)
+    fn send_ret_submit_async(
+        socket: Arc<std::sync::Mutex<UnixStream>>,
+        devid: u32,
+        request_header: &UsbIpHeader,
+        ret: UsbIpRetSubmit,
+        data: Vec<u8>,
+        iso_packets: Vec<UsbIpIsoPacketDescriptor>,
+    ) -> Result<()> {
+        let mut socket = socket
+            .lock()
+            .map_err(|e| anyhow!("Failed to lock socket: {}", e))?;
+
+        // Write header - preserve direction and ep from request
+        let mut header = UsbIpHeader::new(
+            UsbIpCommand::RetSubmit,
+            request_header.seqnum,
+            devid,
+        );
+        header.direction = request_header.direction;
+        header.ep = request_header.ep;
+        let mut header_buf = Vec::with_capacity(UsbIpHeader::SIZE);
+        header.write_to(&mut header_buf)?;
+
+        trace!(
+            "RET_SUBMIT: seqnum={}, status={}, actual_length={}, data_len={}",
+            request_header.seqnum,
+            ret.status,
+            ret.actual_length,
+            data.len()
+        );
+
+        socket.write_all(&header_buf)?;
+
+        // Write RET_SUBMIT payload
+        let mut ret_buf = Vec::with_capacity(UsbIpRetSubmit::SIZE);
+        ret.write_to(&mut ret_buf)?;
+        socket.write_all(&ret_buf)?;
+
+        // Padding
+        const RET_SUBMIT_PADDING: usize = 8;
+        socket.write_all(&[0u8; RET_SUBMIT_PADDING])?;
+
+        // Write ISO packet descriptors if any
+        let mut iso_buf = Vec::with_capacity(iso_packets.len() * UsbIpIsoPacketDescriptor::SIZE);
+        for iso_packet in &iso_packets {
+            iso_packet.write_to(&mut iso_buf)?;
+        }
+        if !iso_buf.is_empty() {
+            socket.write_all(&iso_buf)?;
+        }
+
+        // Write response data if any
+        if !data.is_empty() {
+            socket.write_all(&data)?;
+        }
+
+        socket.flush()?;
         Ok(())
     }
 
@@ -327,181 +508,6 @@ impl SocketBridge {
                 cmd_type
             )),
         }
-    }
-
-    /// Handle CMD_SUBMIT by forwarding to DeviceProxy (blocking version)
-    ///
-    /// Uses the tokio runtime handle to call async DeviceProxy methods.
-    fn handle_cmd_submit_blocking(
-        &self,
-        rt: &tokio::runtime::Handle,
-        header: UsbIpHeader,
-        cmd: UsbIpCmdSubmit,
-        data: Vec<u8>,
-    ) -> Result<()> {
-        let seqnum = header.seqnum;
-        let max_data_len = cmd.transfer_buffer_length as usize;
-
-        // Create cancellation channel for this transfer
-        let (cancel_tx, _cancel_rx) = oneshot::channel::<()>();
-
-        // Register this transfer as pending (for CMD_UNLINK support)
-        rt.block_on(async {
-            let mut pending = self.pending_transfers.write().await;
-            pending.insert(seqnum, cancel_tx);
-            trace!(
-                "Registered pending transfer: seqnum={}, total_pending={}",
-                seqnum,
-                pending.len()
-            );
-        });
-
-        // Convert USB/IP to our protocol using tokio runtime
-        let usb_request = rt.block_on(async {
-            usbip_to_usb_request(&self.device_proxy, &header, &cmd, data).await
-        })?;
-
-        trace!(
-            "Submitting USB request: seqnum={}, id={}",
-            seqnum, usb_request.id.0
-        );
-
-        // Submit to device proxy (blocking on async call)
-        let result = rt.block_on(async { self.device_proxy.submit_transfer(usb_request).await });
-
-        // Remove from pending transfers
-        rt.block_on(async {
-            let mut pending = self.pending_transfers.write().await;
-            pending.remove(&seqnum);
-            trace!(
-                "Removed pending transfer: seqnum={}, remaining={}",
-                seqnum,
-                pending.len()
-            );
-        });
-
-        // Handle transfer result
-        let usb_response = result.context("Failed to submit transfer to device proxy")?;
-
-        // Convert response back to USB/IP
-        // For non-isochronous transfers (number_of_packets == 0), use the simpler converter
-        // For isochronous, use the full converter that handles ISO packet descriptors
-        let is_isochronous = cmd.number_of_packets > 0;
-        let mut converted = if is_isochronous {
-            usb_response_to_usbip_full(&usb_response)
-        } else {
-            // Use simpler conversion for control/bulk/interrupt transfers
-            let (ret, data) = usb_response_to_usbip(&usb_response);
-            super::usbip_protocol::UsbIpConvertedResponse {
-                ret,
-                data,
-                iso_packets: Vec::new(),
-            }
-        };
-
-        // IMPORTANT: Clamp response data to the kernel's requested buffer size
-        // The kernel allocates exactly transfer_buffer_length bytes for IN transfers.
-        // If we return more data than requested, we'll corrupt memory or cause protocol errors.
-        // This commonly happens with GET_CONFIG_DESCRIPTOR where kernel asks for 9 bytes
-        // (to read wTotalLength) but device returns the full descriptor.
-        if header.direction == 1 && converted.data.len() > max_data_len {
-            trace!(
-                "Clamping response data from {} to {} bytes (kernel buffer size)",
-                converted.data.len(),
-                max_data_len
-            );
-            converted.data.truncate(max_data_len);
-            converted.ret.actual_length = max_data_len as u32;
-        }
-
-        trace!(
-            "Completed USB request: seqnum={}, status={}, len={}, iso_packets={}",
-            seqnum,
-            converted.ret.status,
-            converted.ret.actual_length,
-            converted.iso_packets.len()
-        );
-
-        // Send RET_SUBMIT back to vhci_hcd (blocking)
-        self.send_ret_submit_blocking(
-            &header,
-            converted.ret,
-            converted.data,
-            converted.iso_packets,
-        )?;
-
-        Ok(())
-    }
-
-    /// Send RET_SUBMIT back to vhci_hcd (blocking version)
-    ///
-    /// For isochronous transfers, the response includes ISO packet descriptors
-    /// between the header and the data payload. The USB/IP wire format is:
-    /// - Header (48 bytes: 20 basic + 28 payload)
-    /// - ISO packet descriptors (16 bytes each, if number_of_packets > 0)
-    /// - Transfer data (if any)
-    fn send_ret_submit_blocking(
-        &self,
-        request_header: &UsbIpHeader,
-        ret: UsbIpRetSubmit,
-        data: Vec<u8>,
-        iso_packets: Vec<UsbIpIsoPacketDescriptor>,
-    ) -> Result<()> {
-        let mut socket = self
-            .socket
-            .lock()
-            .map_err(|e| anyhow!("Failed to lock socket: {}", e))?;
-
-        // Write header - preserve direction and ep from request
-        let mut header = UsbIpHeader::new(
-            UsbIpCommand::RetSubmit,
-            request_header.seqnum,
-            request_header.devid,
-        );
-        header.direction = request_header.direction;
-        header.ep = request_header.ep;
-        // Pre-allocate with UsbIpHeader::SIZE capacity for efficient writes
-        let mut header_buf = Vec::with_capacity(UsbIpHeader::SIZE);
-        header.write_to(&mut header_buf)?;
-
-        trace!(
-            "RET_SUBMIT: seqnum={}, status={}, actual_length={}, data_len={}",
-            request_header.seqnum,
-            ret.status,
-            ret.actual_length,
-            data.len()
-        );
-
-        socket.write_all(&header_buf)?;
-
-        // Write RET_SUBMIT payload - pre-allocate with exact size
-        let mut ret_buf = Vec::with_capacity(UsbIpRetSubmit::SIZE);
-        ret.write_to(&mut ret_buf)?;
-        socket.write_all(&ret_buf)?;
-
-        // USB/IP header is always 48 bytes (20 header + 28 union payload)
-        // RET_SUBMIT payload is only 20 bytes, so we need 8 bytes of padding
-        // to match the kernel's expected header size
-        const RET_SUBMIT_PADDING: usize = 8;
-        socket.write_all(&[0u8; RET_SUBMIT_PADDING])?;
-
-        // Write ISO packet descriptors if this is an isochronous transfer
-        // Per USB/IP protocol, ISO descriptors come after the header but before data
-        let mut iso_buf = Vec::with_capacity(iso_packets.len() * UsbIpIsoPacketDescriptor::SIZE);
-        for iso_packet in &iso_packets {
-            iso_packet.write_to(&mut iso_buf)?;
-        }
-        if !iso_buf.is_empty() {
-            socket.write_all(&iso_buf)?;
-        }
-
-        // Write response data if any
-        if !data.is_empty() {
-            socket.write_all(&data)?;
-        }
-
-        socket.flush()?;
-        Ok(())
     }
 
     /// Handle CMD_UNLINK by cancelling a pending transfer (blocking version)

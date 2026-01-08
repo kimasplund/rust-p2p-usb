@@ -18,6 +18,7 @@
 #![allow(unused_imports)]
 
 pub mod device;
+pub mod interrupt_buffer;
 pub mod manager;
 pub mod sharing;
 pub mod transfers;

@@ -1,6 +1,6 @@
 # rust-p2p-usb Project Status
 
-**Last Updated**: 2026-01-07
+**Last Updated**: 2026-01-08
 **Version**: 0.1.0 (Development)
 **Stage**: Alpha - Feature Complete (Testing Phase)
 
@@ -139,9 +139,11 @@ rust-p2p-usb is a high-performance Rust application for secure peer-to-peer USB 
 ### Critical Issues
 
 1. **Virtual USB Enumeration Stalls**
-   - **Symptom**: Device attaches to vhci_hcd but enumeration may not complete
+   - **Symptom**: Device attaches to vhci_hcd, enumeration succeeds, but USB Mass Storage bulk transfers may timeout
+   - **Root cause**: Socket bridge read timeout (EWOULDBLOCK) during sustained bulk I/O
+   - **Affected**: USB storage devices under heavy load; control/interrupt transfers work reliably
    - **Status**: Under investigation
-   - **Workaround**: Retry attach operation
+   - **Workaround**: Retry attach operation; device descriptor reads work correctly
 
 ### Medium Priority Issues
 

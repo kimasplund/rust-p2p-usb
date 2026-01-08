@@ -288,10 +288,11 @@ When working on this project:
 - Multi-client device sharing (DeviceAccessTracker with Exclusive/Shared/Read-Only modes)
 - Device passthrough policies (PolicyEngine: time windows, session limits, client allowlists, class restrictions)
 
-### Not Yet Implemented
+### Known Limitations
 - Isochronous transfers (infrastructure present, disabled)
 - macOS/Windows client (stubs only)
-- Performance benchmarking suite
+- Performance benchmarking suite not yet implemented
+- USB Mass Storage bulk transfers may timeout under heavy load (socket bridge timing)
 
 ### Key Recent Changes (January 2025)
 - Upgraded from iroh 0.28 to iroh 0.95
@@ -313,6 +314,6 @@ See `/docs/PROJECT_STATUS.md` for detailed status and `/docs/CHANGELOG.md` for c
 
 ---
 
-**Last Updated**: 2026-01-07
+**Last Updated**: 2026-01-08
 **Initialized by**: init-workspace-v2
 **Project Stage**: Alpha - Feature Complete (Testing Phase)

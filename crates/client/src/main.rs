@@ -135,7 +135,7 @@ async fn main() -> Result<()> {
                 "Auto-connecting to {} server(s)...",
                 auto_connect_servers.len()
             );
-            for server_config in auto_connect_servers {
+            for server_config in auto_connect_servers.clone() {
                 match server_config.node_id.parse::<EndpointId>() {
                     Ok(server_id) => {
                         let display_name = config.server_display_name(&server_config.node_id);
@@ -143,6 +143,18 @@ async fn main() -> Result<()> {
                         match client.connect_to_server(server_id, None).await {
                             Ok(()) => {
                                 info!("Auto-connected to {}", display_name);
+
+                                // Auto-attach devices if configured for AutoWithDevices
+                                let effective_mode = config.effective_auto_connect(&server_config);
+                                if matches!(effective_mode, config::AutoConnectMode::AutoWithDevices) {
+                                    auto_attach_devices(
+                                        &client,
+                                        &virtual_usb,
+                                        server_id,
+                                        &server_config,
+                                    )
+                                    .await;
+                                }
                             }
                             Err(e) => {
                                 warn!("Failed to auto-connect to {}: {:#}", display_name, e);
@@ -171,6 +183,14 @@ async fn main() -> Result<()> {
             args.headless,
         )
         .await
+    } else if args.headless {
+        // Headless mode without --connect: stay connected until Ctrl+C
+        info!("Running in headless mode. Press Ctrl+C to shutdown.");
+        tokio::signal::ctrl_c()
+            .await
+            .context("Failed to wait for Ctrl+C")?;
+        info!("Received Ctrl+C, shutting down...");
+        Ok(())
     } else {
         run_tui_mode(client, virtual_usb.clone(), &config).await
     };
@@ -417,6 +437,69 @@ async fn connect_and_run(
     }
 
     Ok(())
+}
+
+/// Auto-attach devices for a server based on config
+async fn auto_attach_devices(
+    client: &Arc<IrohClient>,
+    virtual_usb: &Arc<VirtualUsbManager>,
+    server_id: EndpointId,
+    server_config: &config::ServerConfig,
+) {
+    // List available devices
+    match client.list_remote_devices(server_id).await {
+        Ok(devices) => {
+            if devices.is_empty() {
+                info!("No devices available on server for auto-attach");
+                return;
+            }
+
+            info!("Auto-attaching devices from server:");
+            for device in &devices {
+                let product_name = device.product.as_deref();
+
+                // Check if this device matches auto_attach filter
+                let should_attach =
+                    server_config.should_auto_attach(device.vendor_id, device.product_id, product_name);
+
+                if !should_attach {
+                    debug!(
+                        "  [skip] {:04x}:{:04x} - {}",
+                        device.vendor_id,
+                        device.product_id,
+                        product_name.unwrap_or("Unknown")
+                    );
+                    continue;
+                }
+
+                info!(
+                    "  [auto] {:04x}:{:04x} - {}",
+                    device.vendor_id,
+                    device.product_id,
+                    product_name.unwrap_or("Unknown")
+                );
+
+                // Create device proxy and attach as virtual USB device
+                match IrohClient::create_device_proxy(client.clone(), server_id, device.clone()).await
+                {
+                    Ok(device_proxy) => match virtual_usb.attach_device(device_proxy).await {
+                        Ok(global_id) => {
+                            info!("  [ok] Attached as virtual USB device ({})", global_id);
+                        }
+                        Err(e) => {
+                            warn!("  [error] Failed to attach virtual device: {:#}", e);
+                        }
+                    },
+                    Err(e) => {
+                        warn!("  [error] Failed to create device proxy: {:#}", e);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            error!("Failed to list devices for auto-attach: {:#}", e);
+        }
+    }
 }
 
 /// Run in TUI mode (interactive)

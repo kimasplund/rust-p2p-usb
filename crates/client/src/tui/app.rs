@@ -737,11 +737,42 @@ impl App {
         AppAction::None
     }
 
-    /// Handle 'a' key (add server)
-    pub fn start_add_server(&mut self) {
-        self.input_mode = InputMode::AddServer {
-            input: String::new(),
-        };
+    /// Handle 'c' key (connect to server)
+    pub fn handle_connect(&mut self) -> AppAction {
+        if let Some(server) = self.selected_server() {
+            let endpoint_id = server.endpoint_id;
+            match server.status {
+                ServerStatus::Disconnected | ServerStatus::Failed => {
+                    return AppAction::ConnectServer(endpoint_id);
+                }
+                _ => {}
+            }
+        }
+        AppAction::None
+    }
+
+    /// Handle 'a' key (attach device when in devices pane, add server when in servers pane)
+    pub fn handle_attach_or_add(&mut self) -> AppAction {
+        match self.active_pane {
+            ActivePane::Servers => {
+                // Add new server
+                self.input_mode = InputMode::AddServer {
+                    input: String::new(),
+                };
+                AppAction::None
+            }
+            ActivePane::Devices => {
+                // Attach selected device
+                if let (Some(server_id), Some(device)) =
+                    (self.selected_server_id(), self.selected_device())
+                {
+                    if device.status == DeviceStatus::Available {
+                        return AppAction::AttachDevice(server_id, device.info.id);
+                    }
+                }
+                AppAction::None
+            }
+        }
     }
 
     /// Handle input in AddServer mode

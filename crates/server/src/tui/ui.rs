@@ -461,7 +461,7 @@ fn render_help_bar(frame: &mut Frame, area: Rect) {
         ),
         Span::raw(" Navigate  "),
         Span::styled(
-            "Space",
+            "s",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -517,16 +517,23 @@ fn render_help_bar(frame: &mut Frame, area: Rect) {
 
 /// Render the help dialog
 fn render_help_dialog(frame: &mut Frame) {
-    let area = centered_rect(60, 70, frame.area());
+    let area = centered_rect(60, 80, frame.area());
 
     let help_content = vec![
+        Line::from(vec![Span::styled(
+            "Keyboard Shortcuts",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::UNDERLINED),
+        )]),
+        Line::from(""),
         Line::from(vec![Span::styled(
             "Navigation",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )]),
-        Line::from(""),
         Line::from(vec![
             Span::styled("  Up / k       ", Style::default().fg(Color::Cyan)),
             Span::raw("Move selection up"),
@@ -537,14 +544,13 @@ fn render_help_dialog(frame: &mut Frame) {
         ]),
         Line::from(""),
         Line::from(vec![Span::styled(
-            "Actions",
+            "Device Actions",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )]),
-        Line::from(""),
         Line::from(vec![
-            Span::styled("  Space        ", Style::default().fg(Color::Cyan)),
+            Span::styled("  s / Space    ", Style::default().fg(Color::Cyan)),
             Span::raw("Toggle device sharing on/off"),
         ]),
         Line::from(vec![
@@ -574,7 +580,6 @@ fn render_help_dialog(frame: &mut Frame) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )]),
-        Line::from(""),
         Line::from(vec![
             Span::styled("  ?            ", Style::default().fg(Color::Cyan)),
             Span::raw("Show this help"),
@@ -594,7 +599,6 @@ fn render_help_dialog(frame: &mut Frame) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )]),
-        Line::from(""),
         Line::from(vec![
             Span::styled("  Shared       ", Style::default().fg(Color::Green)),
             Span::raw("Device available for clients"),
@@ -610,7 +614,6 @@ fn render_help_dialog(frame: &mut Frame) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )]),
-        Line::from(""),
         Line::from(vec![
             Span::styled("  E            ", Style::default().fg(Color::Red)),
             Span::raw("Exclusive - One client at a time"),
@@ -623,6 +626,11 @@ fn render_help_dialog(frame: &mut Frame) {
             Span::styled("  R            ", Style::default().fg(Color::Yellow)),
             Span::raw("Read-Only - Read shared, write exclusive"),
         ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Press ? or Esc to close",
+            Style::default().fg(Color::DarkGray),
+        )]),
     ];
 
     let help_paragraph = Paragraph::new(help_content)

@@ -63,7 +63,7 @@ impl From<KeyEvent> for Action {
             KeyCode::Down | KeyCode::Char('j') => Action::Down,
 
             // Actions
-            KeyCode::Char(' ') => Action::ToggleSharing,
+            KeyCode::Char(' ') | KeyCode::Char('s') => Action::ToggleSharing,
             KeyCode::Enter => Action::ViewDetails, // Also confirms dialogs via context handling
             KeyCode::Char('y') => Action::Confirm,
             KeyCode::Char('c') => Action::ViewClients,

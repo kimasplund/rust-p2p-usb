@@ -672,13 +672,13 @@ fn render_help_bar(frame: &mut Frame, app: &App, area: Rect) {
     let help_text = match &app.input_mode {
         InputMode::Normal => {
             if app.active_pane == ActivePane::Servers {
-                "Tab: Switch | j/k: Navigate | Enter: Connect | d: Disconnect | a: Add | Q: QR | q: Quit | ?: Help"
+                "Tab: Switch | j/k: Navigate | c: Connect | d: Disconnect | a: Add | r: Refresh | Q: QR | q: Quit | ?: Help"
             } else {
-                "Tab: Switch | j/k: Navigate | Enter: Attach/Detach | d: Detach | r: Refresh | Q: QR | q: Quit | ?: Help"
+                "Tab: Switch | j/k: Navigate | a: Attach | d: Detach | r: Refresh | Q: QR | q: Quit | ?: Help"
             }
         }
         InputMode::AddServer { .. } => "Enter: Confirm | Esc: Cancel",
-        InputMode::Help => "Press any key to close",
+        InputMode::Help => "Press ? or Esc to close",
         InputMode::ConfirmQuit => "y: Quit | n: Cancel",
         InputMode::QrCode => "Press Esc or Q to close",
     };
@@ -732,7 +732,7 @@ fn render_add_server_dialog(frame: &mut Frame, input: &str) {
 
 /// Render the help overlay
 fn render_help_overlay(frame: &mut Frame) {
-    let area = centered_rect(70, 70, frame.area());
+    let area = centered_rect(70, 80, frame.area());
 
     // Clear the area first
     frame.render_widget(Clear, area);
@@ -741,55 +741,129 @@ fn render_help_overlay(frame: &mut Frame) {
         Line::from(Span::styled(
             "Keyboard Shortcuts",
             Style::default()
+                .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD)
                 .add_modifier(Modifier::UNDERLINED),
         )),
         Line::from(""),
         Line::from(Span::styled(
             "Navigation",
-            Style::default().add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         )),
-        Line::from("  Tab          Switch between server and device pane"),
-        Line::from("  Up / k       Move selection up"),
-        Line::from("  Down / j     Move selection down"),
+        Line::from(vec![
+            Span::styled("  Tab          ", Style::default().fg(Color::Cyan)),
+            Span::raw("Switch between server and device pane"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Up / k       ", Style::default().fg(Color::Cyan)),
+            Span::raw("Move selection up"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Down / j     ", Style::default().fg(Color::Cyan)),
+            Span::raw("Move selection down"),
+        ]),
         Line::from(""),
         Line::from(Span::styled(
             "Server Actions",
-            Style::default().add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         )),
-        Line::from("  Enter        Connect to selected server"),
-        Line::from("  d            Disconnect from selected server"),
-        Line::from("  a            Add new server by EndpointId"),
-        Line::from("  r            Refresh device list"),
+        Line::from(vec![
+            Span::styled("  c / Enter    ", Style::default().fg(Color::Cyan)),
+            Span::raw("Connect to selected server"),
+        ]),
+        Line::from(vec![
+            Span::styled("  d            ", Style::default().fg(Color::Cyan)),
+            Span::raw("Disconnect from selected server"),
+        ]),
+        Line::from(vec![
+            Span::styled("  a            ", Style::default().fg(Color::Cyan)),
+            Span::raw("Add new server by EndpointId"),
+        ]),
+        Line::from(vec![
+            Span::styled("  r            ", Style::default().fg(Color::Cyan)),
+            Span::raw("Refresh device list"),
+        ]),
         Line::from(""),
         Line::from(Span::styled(
             "Device Actions",
-            Style::default().add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         )),
-        Line::from("  Enter        Attach/Detach selected device"),
-        Line::from("  d            Detach selected device"),
+        Line::from(vec![
+            Span::styled("  a / Enter    ", Style::default().fg(Color::Cyan)),
+            Span::raw("Attach selected device"),
+        ]),
+        Line::from(vec![
+            Span::styled("  d            ", Style::default().fg(Color::Cyan)),
+            Span::raw("Detach selected device"),
+        ]),
         Line::from(""),
         Line::from(Span::styled(
             "General",
-            Style::default().add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         )),
-        Line::from("  ?            Show this help"),
-        Line::from("  Q            Show QR code (for server approval)"),
-        Line::from("  q            Quit (with confirmation)"),
-        Line::from("  Ctrl+C       Quit immediately"),
+        Line::from(vec![
+            Span::styled("  ?            ", Style::default().fg(Color::Cyan)),
+            Span::raw("Show this help"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Q            ", Style::default().fg(Color::Cyan)),
+            Span::raw("Show QR code (for server approval)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Esc          ", Style::default().fg(Color::Cyan)),
+            Span::raw("Close dialog"),
+        ]),
+        Line::from(vec![
+            Span::styled("  q / Ctrl+C   ", Style::default().fg(Color::Cyan)),
+            Span::raw("Quit application"),
+        ]),
         Line::from(""),
         Line::from(Span::styled(
             "Status Icons",
-            Style::default().add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         )),
-        Line::from("  [*] Connected/Attached    [~] Connecting/Attaching"),
-        Line::from("  [ ] Disconnected/Available    [!] Failed    [#] Busy"),
+        Line::from(vec![
+            Span::styled("  [*]          ", Style::default().fg(colors::CONNECTED)),
+            Span::raw("Connected / Attached"),
+        ]),
+        Line::from(vec![
+            Span::styled("  [~]          ", Style::default().fg(colors::CONNECTING)),
+            Span::raw("Connecting / Attaching"),
+        ]),
+        Line::from(vec![
+            Span::styled("  [ ]          ", Style::default().fg(colors::AVAILABLE)),
+            Span::raw("Disconnected / Available"),
+        ]),
+        Line::from(vec![
+            Span::styled("  [!]          ", Style::default().fg(colors::FAILED)),
+            Span::raw("Failed"),
+        ]),
+        Line::from(vec![
+            Span::styled("  [#]          ", Style::default().fg(colors::BUSY)),
+            Span::raw("Busy (in use by another client)"),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Press ? or Esc to close",
+            Style::default().fg(Color::DarkGray),
+        )]),
     ]);
 
     let paragraph = Paragraph::new(help_text)
         .block(
             Block::default()
                 .title(" Help ")
+                .title_alignment(Alignment::Center)
                 .title_style(Style::default().add_modifier(Modifier::BOLD))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(colors::ACTIVE_BORDER)),

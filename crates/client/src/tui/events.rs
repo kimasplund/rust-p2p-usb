@@ -91,12 +91,10 @@ impl EventHandler {
 
             // Actions
             KeyCode::Enter => app.handle_enter(),
+            KeyCode::Char('c') => app.handle_connect(),
+            KeyCode::Char('a') => app.handle_attach_or_add(),
             KeyCode::Char('d') => app.handle_disconnect(),
             KeyCode::Char('r') => app.handle_refresh(),
-            KeyCode::Char('a') => {
-                app.start_add_server();
-                AppAction::None
-            }
 
             // Help
             KeyCode::Char('?') => {

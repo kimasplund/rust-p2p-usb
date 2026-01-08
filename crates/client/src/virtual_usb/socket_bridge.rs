@@ -53,9 +53,12 @@ use tracing::{debug, error, info, trace};
 pub struct SocketBridge {
     /// Device proxy for communicating with remote USB device
     device_proxy: Arc<DeviceProxy>,
-    /// Unix socket (our end of socketpair) connected to vhci_hcd
-    /// Using std::sync::Mutex for synchronous blocking I/O
-    socket: Arc<std::sync::Mutex<UnixStream>>,
+    /// Unix socket read half (for blocking reads in main loop)
+    /// This is owned by the blocking reader thread - no lock needed
+    read_socket: Arc<std::sync::Mutex<UnixStream>>,
+    /// Unix socket write half (for async task responses)
+    /// Separate from read to avoid blocking on read while writing
+    write_socket: Arc<std::sync::Mutex<UnixStream>>,
     /// vhci FD stream (kept alive to prevent socketpair from closing)
     _vhci_stream: UnixStream,
     /// Device ID for USB/IP protocol
@@ -105,11 +108,17 @@ impl SocketBridge {
         // 2. Extract vhci FD before any operations
         let vhci_fd = vhci_stream.as_raw_fd();
 
-        // 3. Keep bridge_stream in BLOCKING mode for synchronous I/O
+        // 3. Clone the bridge_stream for separate read/write handles
+        // This avoids deadlock where the write blocks on read holding the lock
+        let write_stream = bridge_stream
+            .try_clone()
+            .context("Failed to clone socket for write handle")?;
+
+        // 4. Keep bridge_stream in BLOCKING mode for synchronous I/O
         // The socket bridge will run in a blocking thread (spawn_blocking)
         // This avoids potential issues with tokio's async FD handling
 
-        // 4. Keep BOTH socketpair ends alive for ongoing communication
+        // 5. Keep BOTH socketpair ends alive for ongoing communication
         // vhci_stream is stored to prevent socketpair from closing when kernel closes its dup'd FD
 
         // Calculate optimal buffer size based on device speed for efficient memory allocation
@@ -118,7 +127,8 @@ impl SocketBridge {
 
         let bridge = Self {
             device_proxy,
-            socket: Arc::new(std::sync::Mutex::new(bridge_stream)),
+            read_socket: Arc::new(std::sync::Mutex::new(bridge_stream)),
+            write_socket: Arc::new(std::sync::Mutex::new(write_stream)),
             _vhci_stream: vhci_stream,
             devid,
             port,
@@ -233,7 +243,7 @@ impl SocketBridge {
                     // This allows multiple transfers to be in-flight simultaneously,
                     // which is crucial for HID devices where key-up must follow key-down quickly
                     let device_proxy = self.device_proxy.clone();
-                    let socket = self.socket.clone();
+                    let write_socket = self.write_socket.clone();
                     let pending_transfers = self.pending_transfers.clone();
                     let interrupt_locks = self.interrupt_endpoint_locks.clone();
                     let devid = self.devid;
@@ -241,7 +251,7 @@ impl SocketBridge {
                     rt.spawn(async move {
                         if let Err(e) = Self::handle_cmd_submit_async(
                             device_proxy,
-                            socket,
+                            write_socket,
                             pending_transfers,
                             interrupt_locks,
                             devid,
@@ -482,9 +492,9 @@ impl SocketBridge {
     /// Returns a parsed UsbIpMessage (either Submit or Unlink)
     fn read_usbip_message_blocking(&self) -> Result<UsbIpMessage> {
         let mut socket = self
-            .socket
+            .read_socket
             .lock()
-            .map_err(|e| anyhow!("Failed to lock socket: {}", e))?;
+            .map_err(|e| anyhow!("Failed to lock read_socket: {}", e))?;
 
         trace!(
             "Waiting to read from socket for device {} port {}",
@@ -631,9 +641,9 @@ impl SocketBridge {
     /// - Padding to match kernel struct alignment (16 bytes)
     fn send_ret_unlink_blocking(&self, seqnum: u32, status: i32) -> Result<()> {
         let mut socket = self
-            .socket
+            .write_socket
             .lock()
-            .map_err(|e| anyhow!("Failed to lock socket: {}", e))?;
+            .map_err(|e| anyhow!("Failed to lock write_socket: {}", e))?;
 
         // Write header (20 bytes) - pre-allocate with exact size
         let header = UsbIpHeader::new(UsbIpCommand::RetUnlink, seqnum, self.devid);

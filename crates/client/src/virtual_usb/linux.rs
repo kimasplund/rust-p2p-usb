@@ -33,7 +33,7 @@
 
 use anyhow::{Context, Result, anyhow};
 use iroh::PublicKey as EndpointId;
-use protocol::{DeviceHandle, DeviceSpeed};
+use protocol::DeviceSpeed;
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -179,10 +179,8 @@ impl LinuxVirtualUsbManager {
     ///
     /// Returns a GlobalDeviceId that uniquely identifies the device across all servers.
     pub async fn attach_device(&self, device_proxy: Arc<DeviceProxy>) -> Result<GlobalDeviceId> {
-        let device_info = device_proxy.device_info();
+        let device_info = device_proxy.device_info().clone();
         let server_id = device_proxy.server_id();
-        let handle = DeviceHandle(device_info.id.0);
-        let global_id = GlobalDeviceId::new(server_id, handle);
 
         debug!(
             "Attaching virtual device: {} (VID: {:04x}, PID: {:04x}) from server {}",
@@ -192,13 +190,21 @@ impl LinuxVirtualUsbManager {
             &server_id.to_string()[..8]
         );
 
-        // Ensure device proxy is attached to remote
+        // Ensure device proxy is attached to remote FIRST to get the real DeviceHandle
         if !device_proxy.is_attached().await {
             device_proxy
                 .attach()
                 .await
                 .context("Failed to attach to remote device")?;
         }
+
+        // Get the REAL DeviceHandle from the server (not DeviceId!)
+        let handle = device_proxy
+            .handle()
+            .await
+            .context("Device attached but no handle available")?;
+
+        let global_id = GlobalDeviceId::new(server_id, handle);
 
         // Map device speed to USB/IP speed code
         let speed = map_device_speed(device_info.speed);
@@ -211,7 +217,7 @@ impl LinuxVirtualUsbManager {
             device_info.speed, speed, port, handle.0
         );
 
-        // Generate unique device ID (using device handle as ID)
+        // Use the server-assigned DeviceHandle as the USB/IP devid
         let devid = handle.0;
 
         // Create socket bridge for USB/IP protocol

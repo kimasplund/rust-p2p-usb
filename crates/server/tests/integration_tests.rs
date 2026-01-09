@@ -371,6 +371,7 @@ async fn test_usb_bridge_submit_transfer_flow() {
                         0x12, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x40, 0x34, 0x12, 0x78, 0x56,
                         0x00, 0x01, 0x01, 0x02, 0x03, 0x01,
                     ],
+                    checksum: None,
                 },
             };
             response.send(usb_response).expect("Failed to send");
@@ -405,7 +406,7 @@ async fn test_usb_bridge_submit_transfer_flow() {
     let response = rx.await.expect("Failed to receive");
     assert_eq!(response.id.0, 12345);
 
-    if let TransferResult::Success { data } = response.result {
+    if let TransferResult::Success { data, .. } = response.result {
         assert_eq!(data.len(), 18); // Device descriptor size
         assert_eq!(data[0], 0x12); // bLength
         assert_eq!(data[1], 0x01); // bDescriptorType (Device)

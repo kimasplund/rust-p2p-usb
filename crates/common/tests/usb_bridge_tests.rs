@@ -236,6 +236,7 @@ async fn test_submit_transfer_command_flow() {
         id: RequestId(12345),
         result: TransferResult::Success {
             data: vec![0x12, 0x01], // Partial device descriptor
+            checksum: None,
         },
     };
 
@@ -273,7 +274,7 @@ async fn test_submit_transfer_command_flow() {
 
     let response = rx.await.expect("Failed to receive");
     assert_eq!(response.id.0, 12345);
-    if let TransferResult::Success { data } = response.result {
+    if let TransferResult::Success { data, .. } = response.result {
         assert_eq!(data.len(), 2);
     } else {
         panic!("Expected success result");

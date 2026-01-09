@@ -456,17 +456,22 @@ fn execute_interrupt_transfer(
 ) -> TransferResult {
     let is_in = (endpoint & 0x80) != 0;
 
-    // For interrupt IN transfers, use a SHORT timeout. The USB/IP client
-    // continuously re-submits these transfers, so blocking here blocks ALL
-    // other transfers (the USB worker is single-threaded).
+    // For interrupt IN transfers, use a VERY SHORT timeout to avoid blocking
+    // the single-threaded USB worker. Since USB/IP clients continuously
+    // re-submit interrupt URBs, any pending data will be caught on the next poll.
     //
-    // 50ms is enough to catch any pending HID data while keeping the worker
-    // responsive. The client will immediately re-submit after timeout.
+    // CRITICAL: Using 50ms caused mass storage enumeration to fail because
+    // control/bulk transfers for USB mass storage were blocked behind multiple
+    // concurrent HID interrupt polls (keyboard + mouse = 100ms+ cumulative wait).
     //
-    // IMPORTANT: Long timeouts here cause mass storage enumeration failures
-    // because control transfers get queued behind slow interrupt polls.
+    // 1ms is enough to return immediately if data is available while minimizing
+    // blocking. HID data won't be missed because:
+    // 1. HID events are edge-triggered (key press/release), not sampled
+    // 2. Client will immediately resubmit after timeout, catching any new data
+    // 3. USB controller buffers data until read
     let timeout = if is_in {
-        Duration::from_millis(50.min(timeout_ms as u64))
+        // 1ms timeout: return immediately if no data, catch any pending data
+        Duration::from_millis(1.min(timeout_ms as u64))
     } else {
         Duration::from_millis(timeout_ms as u64)
     };

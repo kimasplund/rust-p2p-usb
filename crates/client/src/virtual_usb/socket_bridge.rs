@@ -81,8 +81,15 @@ pub struct SocketBridge {
     /// Used to suppress late RET_SUBMIT responses for cancelled transfers
     /// The kernel removes URBs from its pending list immediately on CMD_UNLINK,
     /// so any RET_SUBMIT arriving after that causes "cannot find urb" errors
+    ///
+    /// Note: This set is periodically cleaned when it exceeds MAX_UNLINKED_SEQNUMS
+    /// to prevent unbounded memory growth from completed transfers that were unlinked late.
     unlinked_seqnums: Arc<RwLock<HashSet<u32>>>,
 }
+
+/// Maximum number of unlinked seqnums to track before cleanup
+/// After this limit, old entries are cleared since transfers should have long completed
+const MAX_UNLINKED_SEQNUMS: usize = 100;
 
 impl SocketBridge {
     /// Create a new socketpair-based socket bridge
@@ -230,6 +237,9 @@ impl SocketBridge {
                         || err_str.contains("Broken pipe")
                         || err_str.contains("Connection reset")
                     {
+                        // IMPORTANT: Set running=false BEFORE break to prevent async tasks
+                        // from writing to the closed socket (causes "unknown pdu 0" errors)
+                        self.running.store(false, Ordering::Release);
                         info!(
                             "vhci_hcd closed connection for port {} (kernel disconnected device)",
                             self.port
@@ -242,6 +252,20 @@ impl SocketBridge {
                         debug!("Socket temporarily unavailable for port {}", self.port);
                         std::thread::sleep(std::time::Duration::from_millis(10));
                         continue;
+                    }
+                    // Read timeout - treat as clean disconnect to avoid stream desync
+                    // If we timeout partway through a message, the stream would be corrupted
+                    // Better to close cleanly than risk "unknown pdu 0" errors
+                    if err_str.contains("timed out")
+                        || err_str.contains("WouldBlock")
+                        || err_str.contains("operation timed out")
+                    {
+                        self.running.store(false, Ordering::Release);
+                        info!(
+                            "Read timeout for port {} - treating as disconnect",
+                            self.port
+                        );
+                        break;
                     }
                     error!("Failed to read USB/IP message: {:#}", e);
                     // On unexpected error, sleep briefly to avoid tight loop
@@ -266,6 +290,7 @@ impl SocketBridge {
                     let pending_transfers = self.pending_transfers.clone();
                     let interrupt_locks = self.interrupt_endpoint_locks.clone();
                     let unlinked_seqnums = self.unlinked_seqnums.clone();
+                    let running = self.running.clone();
                     let devid = self.devid;
 
                     rt.spawn(async move {
@@ -275,6 +300,7 @@ impl SocketBridge {
                             pending_transfers,
                             interrupt_locks,
                             unlinked_seqnums,
+                            running,
                             devid,
                             header,
                             cmd,
@@ -312,6 +338,7 @@ impl SocketBridge {
         pending_transfers: Arc<RwLock<HashMap<u32, oneshot::Sender<()>>>>,
         interrupt_locks: Arc<RwLock<HashMap<u8, Arc<AsyncMutex<()>>>>>,
         unlinked_seqnums: Arc<RwLock<HashSet<u32>>>,
+        running: Arc<AtomicBool>,
         devid: u32,
         header: UsbIpHeader,
         cmd: UsbIpCmdSubmit,
@@ -435,6 +462,16 @@ impl SocketBridge {
             converted.iso_packets.len()
         );
 
+        // Check if bridge has stopped (socket closed) before trying to write
+        // This prevents "unknown pdu 0" errors when we try to write to a reset socket
+        if !running.load(Ordering::Acquire) {
+            debug!(
+                "Suppressing RET_SUBMIT for seqnum={}: bridge stopped",
+                seqnum
+            );
+            return Ok(());
+        }
+
         // Check if this seqnum was unlinked while we were processing
         // If so, suppress the response to avoid "cannot find urb" kernel errors
         {
@@ -447,6 +484,15 @@ impl SocketBridge {
                 );
                 return Ok(());
             }
+        }
+
+        // Double-check running flag before write (it may have changed during async operations)
+        if !running.load(Ordering::Acquire) {
+            debug!(
+                "Suppressing RET_SUBMIT for seqnum={}: bridge stopped (late check)",
+                seqnum
+            );
+            return Ok(());
         }
 
         // Send RET_SUBMIT back to vhci_hcd
@@ -675,6 +721,18 @@ impl SocketBridge {
         // This prevents "cannot find urb" kernel errors when server responses arrive late
         rt.block_on(async {
             let mut unlinked = self.unlinked_seqnums.write().await;
+
+            // Clean up if we have too many tracked seqnums (prevents memory leak)
+            // After MAX_UNLINKED_SEQNUMS, transfers should have long completed
+            if unlinked.len() >= MAX_UNLINKED_SEQNUMS {
+                debug!(
+                    "Clearing {} stale unlinked seqnums (exceeded limit of {})",
+                    unlinked.len(),
+                    MAX_UNLINKED_SEQNUMS
+                );
+                unlinked.clear();
+            }
+
             unlinked.insert(seqnum_unlink);
             trace!(
                 "Tracking unlinked seqnum {}, total unlinked: {}",

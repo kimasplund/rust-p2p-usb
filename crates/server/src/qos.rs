@@ -579,6 +579,7 @@ mod tests {
                 endpoint: 0x01,
                 data: vec![0u8; 64],
                 timeout_ms: 1000,
+                checksum: None,
             },
         }
     }
@@ -612,6 +613,7 @@ mod tests {
             endpoint: 0x01,
             data: vec![],
             timeout_ms: 1000,
+            checksum: None,
         };
         assert_eq!(Priority::for_transfer_type(&bulk), Priority::Medium);
     }

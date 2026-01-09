@@ -147,7 +147,7 @@ fn execute_control_transfer(
                     debug!(
                         "GET_MAX_LUN stalled (single-LUN device), returning 0x00"
                     );
-                    return TransferResult::Success { data: vec![0x00] };
+                    return TransferResult::Success { data: vec![0x00], checksum: None };
                 }
 
                 // GET_DESCRIPTOR for DEVICE_QUALIFIER (0x06):
@@ -206,7 +206,7 @@ fn execute_control_transfer(
     match result {
         Ok(data) => {
             debug!("Control transfer succeeded: {} bytes", data.len());
-            TransferResult::Success { data }
+            TransferResult::Success { data, checksum: None }
         }
         Err(error) => {
             warn!("Control transfer failed: {:?}", error);
@@ -529,7 +529,7 @@ fn execute_interrupt_transfer(
             if !data.is_empty() {
                 debug!("Interrupt transfer succeeded: {} bytes", data.len());
             }
-            TransferResult::Success { data }
+            TransferResult::Success { data, checksum: None }
         }
         Err(error) => {
             warn!("Interrupt transfer failed: {:?}", error);

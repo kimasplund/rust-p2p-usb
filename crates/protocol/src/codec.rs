@@ -387,6 +387,7 @@ mod tests {
                 endpoint: 0x81,
                 data,
                 timeout_ms: 5000,
+                checksum: None,
             },
         };
 

@@ -167,6 +167,8 @@ pub enum TransferType {
         data: Vec<u8>,
         /// Timeout in milliseconds
         timeout_ms: u32,
+        /// Optional checksum for data integrity (for OUT transfers)
+        checksum: Option<u32>,
     },
     /// Isochronous transfer
     ///
@@ -210,6 +212,8 @@ pub enum TransferResult {
         /// Data received (for IN transfers), empty for OUT transfers
         #[serde(with = "serde_bytes")]
         data: Vec<u8>,
+        /// Optional checksum for data integrity (for IN transfers)
+        checksum: Option<u32>,
     },
     /// Transfer failed with error
     Error {

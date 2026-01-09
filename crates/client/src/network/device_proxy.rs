@@ -7,7 +7,7 @@ use anyhow::{Context, Result, anyhow};
 use iroh::PublicKey as EndpointId;
 use protocol::{
     DeviceHandle, DeviceId, DeviceInfo, RequestId, TransferResult, TransferType, UsbRequest,
-    UsbResponse,
+    UsbResponse, integrity::{compute_checksum, verify_checksum}, UsbError,
 };
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -193,6 +193,14 @@ impl DeviceProxy {
         timeout_ms: u32,
     ) -> Result<UsbResponse> {
         let handle = self.get_handle().await?;
+        let is_in = (endpoint & 0x80) != 0;
+
+        // Calculate checksum for OUT transfers
+        let checksum = if !is_in {
+            Some(compute_checksum(&data))
+        } else {
+            None
+        };
 
         let usb_request = UsbRequest {
             id: request_id,
@@ -201,10 +209,30 @@ impl DeviceProxy {
                 endpoint,
                 data,
                 timeout_ms,
+                checksum,
             },
         };
 
-        self.submit_transfer(usb_request).await
+        let response = self.submit_transfer(usb_request).await?;
+
+        // Verify checksum for IN transfers
+        if is_in {
+            if let TransferResult::Success { data, checksum: Some(expected) } = &response.result {
+                if !verify_checksum(data, *expected) {
+                    warn!("Bulk IN checksum mismatch: expected {:#x}", expected);
+                    return Ok(UsbResponse {
+                        id: request_id,
+                        result: TransferResult::Error {
+                            error: UsbError::Other {
+                                message: "Checksum mismatch".to_string(),
+                            },
+                        },
+                    });
+                }
+            }
+        }
+
+        Ok(response)
     }
 
     /// Perform a bulk transfer

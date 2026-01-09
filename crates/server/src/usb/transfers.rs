@@ -15,7 +15,7 @@
 
 use protocol::{
     DeviceSpeed, IsoPacketDescriptor, SuperSpeedConfig, TransferResult, TransferType, UsbError,
-    UsbResponse,
+    UsbResponse, integrity::{compute_checksum, verify_checksum},
 };
 use rusb::DeviceHandle;
 use std::time::Duration;
@@ -58,7 +58,8 @@ pub fn execute_transfer(
             endpoint,
             data,
             timeout_ms,
-        } => execute_bulk_transfer(handle, endpoint, data, timeout_ms),
+            checksum,
+        } => execute_bulk_transfer(handle, endpoint, data, timeout_ms, checksum),
 
         TransferType::Interrupt {
             endpoint,
@@ -231,9 +232,24 @@ fn execute_bulk_transfer(
     endpoint: u8,
     data: Vec<u8>,
     timeout_ms: u32,
+    checksum: Option<u32>,
 ) -> TransferResult {
     let is_in = (endpoint & 0x80) != 0;
     let transfer_size = data.len();
+
+    // Verify checksum for OUT transfers (if provided)
+    if !is_in {
+        if let Some(expected) = checksum {
+            if !verify_checksum(&data, expected) {
+                warn!("Bulk OUT checksum mismatch: expected {:#x}", expected);
+                return TransferResult::Error {
+                    error: UsbError::Other {
+                        message: "Checksum mismatch".to_string(),
+                    },
+                };
+            }
+        }
+    }
 
     // For bulk IN transfers (like printer status reads), use a short timeout
     // since the device may not have data available. This prevents blocking
@@ -380,6 +396,13 @@ fn execute_bulk_transfer(
 
     match result {
         Ok(data) => {
+            // Calculate checksum for IN transfers
+            let response_checksum = if is_in {
+                Some(compute_checksum(&data))
+            } else {
+                None
+            };
+
             if data.len() > MAX_BULK_SIZE_HIGH_SPEED {
                 debug!(
                     "SuperSpeed bulk transfer succeeded: {}KB",
@@ -388,7 +411,7 @@ fn execute_bulk_transfer(
             } else {
                 trace!("Bulk transfer succeeded: {} bytes", data.len());
             }
-            TransferResult::Success { data }
+            TransferResult::Success { data, checksum: response_checksum }
         }
         Err(error) => {
             warn!("Bulk transfer failed: {:?}", error);

@@ -193,6 +193,39 @@ impl DeviceProxy {
         timeout_ms: u32,
     ) -> Result<UsbResponse> {
         let handle = self.get_handle().await?;
+
+        let usb_request = UsbRequest {
+            id: request_id,
+            handle,
+            transfer: TransferType::Interrupt {
+                endpoint,
+                data,
+                timeout_ms,
+            },
+        };
+
+        self.submit_transfer(usb_request).await
+    }
+
+    /// Perform a bulk transfer
+    ///
+    /// # Arguments
+    /// * `request_id` - Unique request ID
+    /// * `endpoint` - Endpoint address (includes direction bit)
+    /// * `data` - Data to send (OUT) or buffer size for IN transfers
+    /// * `timeout_ms` - Transfer timeout in milliseconds
+    ///
+    /// # Returns
+    /// Transfer result with data (for IN transfers)
+    #[allow(dead_code)]
+    pub async fn bulk_transfer(
+        &self,
+        request_id: RequestId,
+        endpoint: u8,
+        data: Vec<u8>,
+        timeout_ms: u32,
+    ) -> Result<UsbResponse> {
+        let handle = self.get_handle().await?;
         let is_in = (endpoint & 0x80) != 0;
 
         // Calculate checksum for OUT transfers
@@ -205,7 +238,7 @@ impl DeviceProxy {
         let usb_request = UsbRequest {
             id: request_id,
             handle,
-            transfer: TransferType::Interrupt {
+            transfer: TransferType::Bulk {
                 endpoint,
                 data,
                 timeout_ms,
@@ -233,39 +266,6 @@ impl DeviceProxy {
         }
 
         Ok(response)
-    }
-
-    /// Perform a bulk transfer
-    ///
-    /// # Arguments
-    /// * `request_id` - Unique request ID
-    /// * `endpoint` - Endpoint address (includes direction bit)
-    /// * `data` - Data to send (OUT) or buffer size for IN transfers
-    /// * `timeout_ms` - Transfer timeout in milliseconds
-    ///
-    /// # Returns
-    /// Transfer result with data (for IN transfers)
-    #[allow(dead_code)]
-    pub async fn bulk_transfer(
-        &self,
-        request_id: RequestId,
-        endpoint: u8,
-        data: Vec<u8>,
-        timeout_ms: u32,
-    ) -> Result<UsbResponse> {
-        let handle = self.get_handle().await?;
-
-        let usb_request = UsbRequest {
-            id: request_id,
-            handle,
-            transfer: TransferType::Bulk {
-                endpoint,
-                data,
-                timeout_ms,
-            },
-        };
-
-        self.submit_transfer(usb_request).await
     }
 
     /// Submit transfer with automatic retry on transient errors

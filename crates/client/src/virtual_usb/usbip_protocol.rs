@@ -509,6 +509,7 @@ pub async fn usbip_to_usb_request(
                 endpoint,
                 data: transfer_data,
                 timeout_ms,
+                checksum: None,
             }
         }
     };
@@ -536,7 +537,7 @@ pub fn usb_response_to_usbip(response: &UsbResponse) -> (UsbIpRetSubmit, Vec<u8>
 /// Convert our protocol UsbResponse to USB/IP RET_SUBMIT with full ISO support
 pub fn usb_response_to_usbip_full(response: &UsbResponse) -> UsbIpConvertedResponse {
     match &response.result {
-        protocol::TransferResult::Success { data } => {
+        protocol::TransferResult::Success { data, .. } => {
             let ret = UsbIpRetSubmit::success(data.len() as u32);
             UsbIpConvertedResponse {
                 ret,
@@ -849,6 +850,7 @@ mod tests {
             id: protocol::RequestId(1),
             result: protocol::TransferResult::Success {
                 data: vec![0x01, 0x02, 0x03, 0x04],
+                checksum: None,
             },
         };
 

@@ -687,7 +687,7 @@ mod tests {
     #[test]
     fn test_device_id_generation() {
         // Device ID is just the handle value
-        let handle = DeviceHandle(0x12345678);
+        let handle = protocol::DeviceHandle(0x12345678);
         assert_eq!(handle.0, 0x12345678);
     }
 

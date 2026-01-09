@@ -362,6 +362,7 @@ fn test_submit_transfer_bulk_roundtrip() {
             endpoint: 0x81,
             data: vec![0xAB; 512],
             timeout_ms: 5000,
+            checksum: None,
         },
     };
 
@@ -375,6 +376,7 @@ fn test_submit_transfer_bulk_roundtrip() {
             endpoint,
             data,
             timeout_ms,
+            checksum: _,
         } = request.transfer
         {
             assert_eq!(endpoint, 0x81);
@@ -412,6 +414,7 @@ fn test_transfer_complete_success_roundtrip() {
         id: RequestId(12345),
         result: TransferResult::Success {
             data: vec![0x12, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x40],
+            checksum: None,
         },
     };
 
@@ -422,7 +425,7 @@ fn test_transfer_complete_success_roundtrip() {
 
     if let MessagePayload::TransferComplete { response } = decoded.payload {
         assert_eq!(response.id.0, 12345);
-        if let TransferResult::Success { data } = response.result {
+        if let TransferResult::Success { data, .. } = response.result {
             assert_eq!(data.len(), 8);
             assert_eq!(data[0], 0x12); // Device descriptor length
         } else {
@@ -493,6 +496,7 @@ fn test_large_transfer_64kb_payload() {
             endpoint: 0x02,
             data: data_64kb.clone(),
             timeout_ms: 30000,
+            checksum: None,
         },
     };
 
@@ -519,7 +523,7 @@ fn test_large_transfer_256kb_payload() {
 
     let response = UsbResponse {
         id: RequestId(2),
-        result: TransferResult::Success { data: data_256kb },
+        result: TransferResult::Success { data: data_256kb, checksum: None },
     };
 
     let msg = create_message(MessagePayload::TransferComplete { response });
@@ -528,7 +532,7 @@ fn test_large_transfer_256kb_payload() {
     let decoded = decode_framed(&framed).expect("Failed to decode 256KB framed message");
 
     if let MessagePayload::TransferComplete { response } = decoded.payload {
-        if let TransferResult::Success { data } = response.result {
+        if let TransferResult::Success { data, .. } = response.result {
             assert_eq!(data.len(), 256 * 1024);
         } else {
             panic!("Expected success result");
@@ -765,6 +769,7 @@ fn test_empty_bulk_transfer() {
             endpoint: 0x01,
             data: vec![],
             timeout_ms: 1000,
+            checksum: None,
         },
     };
 
@@ -863,6 +868,7 @@ fn test_decode_corrupted_middle() {
                 endpoint: 0x81,
                 data: vec![0; 64],
                 timeout_ms: 5000,
+                checksum: None,
             },
         },
     });
@@ -1083,6 +1089,7 @@ fn test_mock_usb_transfer_flow() {
                     0x12, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x40, // Device descriptor
                     0x34, 0x12, 0x78, 0x56, 0x00, 0x01, 0x01, 0x02, 0x03, 0x01,
                 ],
+                checksum: None,
             },
         },
     });
@@ -1093,7 +1100,7 @@ fn test_mock_usb_transfer_flow() {
     // Verify response
     if let MessagePayload::TransferComplete { response } = client_response.payload {
         assert_eq!(response.id.0, 99999);
-        if let TransferResult::Success { data } = response.result {
+        if let TransferResult::Success { data, .. } = response.result {
             assert_eq!(data.len(), 18);
             assert_eq!(data[0], 0x12); // Device descriptor length
             assert_eq!(data[1], 0x01); // Descriptor type

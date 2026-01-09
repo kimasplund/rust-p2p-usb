@@ -29,6 +29,22 @@
 
 use crc32fast::Hasher;
 
+/// Compute CRC32C checksum for data
+///
+/// Used for verifying integrity of bulk transfers.
+#[inline]
+pub fn compute_checksum(data: &[u8]) -> u32 {
+    let mut hasher = Hasher::new();
+    hasher.update(data);
+    hasher.finalize()
+}
+
+/// Verify CRC32C checksum for bulk data
+#[inline]
+pub fn verify_checksum(data: &[u8], expected_checksum: u32) -> bool {
+    compute_checksum(data) == expected_checksum
+}
+
 /// Compute CRC32C checksum for interrupt data fields
 ///
 /// The checksum covers all fields that could be corrupted:
@@ -242,5 +258,20 @@ mod tests {
         assert!((metrics.integrity_rate() - 0.98).abs() < 0.001);
         assert!((metrics.gap_rate() - 0.05).abs() < 0.001);
         assert!((metrics.recovery_rate() - 0.6667).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_bulk_transfer_checksum() {
+        // Test data
+        let data = vec![0x01, 0x02, 0x03, 0x04, 0x05];
+        let checksum = compute_checksum(&data);
+
+        // Verify checksum
+        assert!(verify_checksum(&data, checksum));
+
+        // Verify corruption detection
+        let mut corrupted_data = data.clone();
+        corrupted_data[2] = 0xFF;
+        assert!(!verify_checksum(&corrupted_data, checksum));
     }
 }

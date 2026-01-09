@@ -584,12 +584,14 @@ fn test_bulk_transfer_type() {
         endpoint: 0x81,
         data: vec![0; 512],
         timeout_ms: 5000,
+        checksum: None,
     };
 
     if let TransferType::Bulk {
         endpoint,
         data,
         timeout_ms,
+        checksum: _,
     } = bulk
     {
         assert_eq!(endpoint, 0x81);
@@ -626,9 +628,10 @@ fn test_interrupt_transfer_type() {
 fn test_transfer_result_success() {
     let success = TransferResult::Success {
         data: vec![1, 2, 3, 4],
+        checksum: None,
     };
 
-    if let TransferResult::Success { data } = success {
+    if let TransferResult::Success { data, .. } = success {
         assert_eq!(data.len(), 4);
     }
 }
@@ -1037,6 +1040,7 @@ fn test_simulated_transfer_flow() {
                 id: RequestId(12345),
                 result: TransferResult::Success {
                     data: create_mock_device_descriptor(),
+                checksum: None,
                 },
             },
         },
@@ -1047,7 +1051,7 @@ fn test_simulated_transfer_flow() {
     // Verify client received correct response
     if let MessagePayload::TransferComplete { response } = client_received.payload {
         assert_eq!(response.id.0, 12345);
-        if let TransferResult::Success { data } = response.result {
+        if let TransferResult::Success { data, .. } = response.result {
             assert_eq!(data.len(), 18); // Device descriptor size
             assert_eq!(data[0], 0x12); // bLength
             assert_eq!(data[1], 0x01); // bDescriptorType (Device)
@@ -1262,6 +1266,7 @@ fn test_large_bulk_transfer() {
                     endpoint: 0x02,
                     data: large_data.clone(),
                     timeout_ms: 30000,
+                    checksum: None,
                 },
             },
         },

@@ -431,6 +431,7 @@ mod transfer_messages {
                 endpoint: 0x81,
                 data: data.clone(),
                 timeout_ms: 5000,
+                checksum: None,
             },
         };
 
@@ -448,6 +449,7 @@ mod transfer_messages {
                     endpoint,
                     data: decoded_data,
                     timeout_ms,
+                    checksum: _,
                 } => {
                     assert_eq!(endpoint, 0x81);
                     assert_eq!(decoded_data.len(), 4096);
@@ -566,6 +568,7 @@ mod transfer_messages {
             id: RequestId(500),
             result: TransferResult::Success {
                 data: vec![0x12, 0x01, 0x00, 0x02],
+                checksum: None,
             },
         };
 
@@ -581,7 +584,7 @@ mod transfer_messages {
             MessagePayload::TransferComplete { response } => {
                 assert_eq!(response.id, RequestId(500));
                 match response.result {
-                    TransferResult::Success { data } => {
+                    TransferResult::Success { data, .. } => {
                         assert_eq!(data, vec![0x12, 0x01, 0x00, 0x02]);
                     }
                     _ => panic!("Expected Success result"),

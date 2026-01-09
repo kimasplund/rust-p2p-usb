@@ -528,8 +528,35 @@ impl SocketBridge {
             .lock()
             .map_err(|e| anyhow!("Failed to lock socket: {}", e))?;
 
-        socket.write_all(&message)?;
-        socket.flush()?;
+        // Check if socket is still valid before writing
+        // This helps detect cases where the kernel has closed the connection during device reset
+        if let Err(e) = socket.write_all(&message) {
+            // Handle broken pipe (kernel closed connection during device reset)
+            if e.kind() == std::io::ErrorKind::BrokenPipe
+                || e.kind() == std::io::ErrorKind::ConnectionReset
+            {
+                debug!(
+                    "Socket closed during RET_SUBMIT write for seqnum={}: {} (device likely reset)",
+                    request_header.seqnum, e
+                );
+                return Ok(()); // Silently ignore - kernel disconnected
+            }
+            return Err(anyhow!("Failed to write RET_SUBMIT: {}", e));
+        }
+
+        if let Err(e) = socket.flush() {
+            if e.kind() == std::io::ErrorKind::BrokenPipe
+                || e.kind() == std::io::ErrorKind::ConnectionReset
+            {
+                debug!(
+                    "Socket closed during RET_SUBMIT flush for seqnum={}: {} (device likely reset)",
+                    request_header.seqnum, e
+                );
+                return Ok(()); // Silently ignore - kernel disconnected
+            }
+            return Err(anyhow!("Failed to flush RET_SUBMIT: {}", e));
+        }
+
         Ok(())
     }
 
@@ -743,8 +770,32 @@ impl SocketBridge {
             .lock()
             .map_err(|e| anyhow!("Failed to lock write_socket: {}", e))?;
 
-        socket.write_all(&message)?;
-        socket.flush()?;
+        // Handle socket closure during device reset gracefully
+        if let Err(e) = socket.write_all(&message) {
+            if e.kind() == std::io::ErrorKind::BrokenPipe
+                || e.kind() == std::io::ErrorKind::ConnectionReset
+            {
+                debug!(
+                    "Socket closed during RET_UNLINK write for seqnum={}: {} (device likely reset)",
+                    seqnum, e
+                );
+                return Ok(()); // Silently ignore - kernel disconnected
+            }
+            return Err(anyhow!("Failed to write RET_UNLINK: {}", e));
+        }
+
+        if let Err(e) = socket.flush() {
+            if e.kind() == std::io::ErrorKind::BrokenPipe
+                || e.kind() == std::io::ErrorKind::ConnectionReset
+            {
+                debug!(
+                    "Socket closed during RET_UNLINK flush for seqnum={}: {} (device likely reset)",
+                    seqnum, e
+                );
+                return Ok(()); // Silently ignore - kernel disconnected
+            }
+            return Err(anyhow!("Failed to flush RET_UNLINK: {}", e));
+        }
 
         Ok(())
     }

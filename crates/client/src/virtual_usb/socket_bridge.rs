@@ -38,7 +38,7 @@ use super::usbip_protocol::{
 };
 use crate::network::device_proxy::DeviceProxy;
 use anyhow::{Context, Result, anyhow};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
@@ -77,6 +77,11 @@ pub struct SocketBridge {
     /// This prevents race conditions where multiple concurrent reads from the
     /// same interrupt endpoint cause duplicate or lost HID reports
     interrupt_endpoint_locks: Arc<RwLock<HashMap<u8, Arc<AsyncMutex<()>>>>>,
+    /// Set of seqnums that have been unlinked via CMD_UNLINK
+    /// Used to suppress late RET_SUBMIT responses for cancelled transfers
+    /// The kernel removes URBs from its pending list immediately on CMD_UNLINK,
+    /// so any RET_SUBMIT arriving after that causes "cannot find urb" errors
+    unlinked_seqnums: Arc<RwLock<HashSet<u32>>>,
 }
 
 impl SocketBridge {
@@ -136,6 +141,7 @@ impl SocketBridge {
             pending_transfers: Arc::new(RwLock::new(HashMap::new())),
             optimal_buffer_size: buffer_size,
             interrupt_endpoint_locks: Arc::new(RwLock::new(HashMap::new())),
+            unlinked_seqnums: Arc::new(RwLock::new(HashSet::new())),
         };
 
         debug!(
@@ -259,6 +265,7 @@ impl SocketBridge {
                     let write_socket = self.write_socket.clone();
                     let pending_transfers = self.pending_transfers.clone();
                     let interrupt_locks = self.interrupt_endpoint_locks.clone();
+                    let unlinked_seqnums = self.unlinked_seqnums.clone();
                     let devid = self.devid;
 
                     rt.spawn(async move {
@@ -267,6 +274,7 @@ impl SocketBridge {
                             write_socket,
                             pending_transfers,
                             interrupt_locks,
+                            unlinked_seqnums,
                             devid,
                             header,
                             cmd,
@@ -303,6 +311,7 @@ impl SocketBridge {
         socket: Arc<std::sync::Mutex<UnixStream>>,
         pending_transfers: Arc<RwLock<HashMap<u32, oneshot::Sender<()>>>>,
         interrupt_locks: Arc<RwLock<HashMap<u8, Arc<AsyncMutex<()>>>>>,
+        unlinked_seqnums: Arc<RwLock<HashSet<u32>>>,
         devid: u32,
         header: UsbIpHeader,
         cmd: UsbIpCmdSubmit,
@@ -426,6 +435,20 @@ impl SocketBridge {
             converted.iso_packets.len()
         );
 
+        // Check if this seqnum was unlinked while we were processing
+        // If so, suppress the response to avoid "cannot find urb" kernel errors
+        {
+            let mut unlinked = unlinked_seqnums.write().await;
+            if unlinked.remove(&seqnum) {
+                debug!(
+                    "Suppressing late RET_SUBMIT for unlinked seqnum={}, remaining unlinked: {}",
+                    seqnum,
+                    unlinked.len()
+                );
+                return Ok(());
+            }
+        }
+
         // Send RET_SUBMIT back to vhci_hcd
         Self::send_ret_submit_async(
             socket,
@@ -440,6 +463,12 @@ impl SocketBridge {
     }
 
     /// Send RET_SUBMIT back to vhci_hcd (for async handler)
+    ///
+    /// IMPORTANT: We buffer the entire message and send it in a single write_all call.
+    /// This ensures atomicity - either the whole message is sent or nothing is sent.
+    /// If we did multiple write_all calls and one failed partway, the kernel would be
+    /// left waiting for the rest of the message and could read zeros as the next header,
+    /// causing "unknown pdu 0" errors.
     fn send_ret_submit_async(
         socket: Arc<std::sync::Mutex<UnixStream>>,
         devid: u32,
@@ -448,11 +477,7 @@ impl SocketBridge {
         data: Vec<u8>,
         iso_packets: Vec<UsbIpIsoPacketDescriptor>,
     ) -> Result<()> {
-        let mut socket = socket
-            .lock()
-            .map_err(|e| anyhow!("Failed to lock socket: {}", e))?;
-
-        // Write header - preserve direction and ep from request
+        // Build header - preserve direction and ep from request
         let mut header = UsbIpHeader::new(
             UsbIpCommand::RetSubmit,
             request_header.seqnum,
@@ -460,42 +485,50 @@ impl SocketBridge {
         );
         header.direction = request_header.direction;
         header.ep = request_header.ep;
-        let mut header_buf = Vec::with_capacity(UsbIpHeader::SIZE);
-        header.write_to(&mut header_buf)?;
 
-        trace!(
-            "RET_SUBMIT: seqnum={}, status={}, actual_length={}, data_len={}",
-            request_header.seqnum,
-            ret.status,
-            ret.actual_length,
-            data.len()
-        );
-
-        socket.write_all(&header_buf)?;
-
-        // Write RET_SUBMIT payload
-        let mut ret_buf = Vec::with_capacity(UsbIpRetSubmit::SIZE);
-        ret.write_to(&mut ret_buf)?;
-        socket.write_all(&ret_buf)?;
-
-        // Padding
+        // Calculate total message size for pre-allocation
         const RET_SUBMIT_PADDING: usize = 8;
-        socket.write_all(&[0u8; RET_SUBMIT_PADDING])?;
+        let iso_size = iso_packets.len() * UsbIpIsoPacketDescriptor::SIZE;
+        let total_size = UsbIpHeader::SIZE + UsbIpRetSubmit::SIZE + RET_SUBMIT_PADDING + iso_size + data.len();
+
+        // Build entire message in a single buffer
+        let mut message = Vec::with_capacity(total_size);
+
+        // Write header (20 bytes)
+        header.write_to(&mut message)?;
+
+        // Write RET_SUBMIT payload (20 bytes)
+        ret.write_to(&mut message)?;
+
+        // Write padding (8 bytes)
+        message.extend_from_slice(&[0u8; RET_SUBMIT_PADDING]);
 
         // Write ISO packet descriptors if any
-        let mut iso_buf = Vec::with_capacity(iso_packets.len() * UsbIpIsoPacketDescriptor::SIZE);
         for iso_packet in &iso_packets {
-            iso_packet.write_to(&mut iso_buf)?;
-        }
-        if !iso_buf.is_empty() {
-            socket.write_all(&iso_buf)?;
+            iso_packet.write_to(&mut message)?;
         }
 
         // Write response data if any
         if !data.is_empty() {
-            socket.write_all(&data)?;
+            message.extend_from_slice(&data);
         }
 
+        debug!(
+            "RET_SUBMIT: seqnum={}, status={}, actual_length={}, data_len={}, total_msg_len={}, header_bytes={:02x?}",
+            request_header.seqnum,
+            ret.status,
+            ret.actual_length,
+            data.len(),
+            message.len(),
+            &message[..16.min(message.len())]
+        );
+
+        // Send entire message atomically
+        let mut socket = socket
+            .lock()
+            .map_err(|e| anyhow!("Failed to lock socket: {}", e))?;
+
+        socket.write_all(&message)?;
         socket.flush()?;
         Ok(())
     }
@@ -594,6 +627,10 @@ impl SocketBridge {
     /// if still in progress. Per USB/IP protocol:
     /// - If transfer is found and cancelled: return status 0 (success)
     /// - If transfer already completed: return status -ENOENT (-2)
+    ///
+    /// IMPORTANT: We always track unlinked seqnums to suppress late RET_SUBMIT responses.
+    /// The kernel removes URBs from its pending list on unlink, so any RET_SUBMIT arriving
+    /// after that causes "cannot find urb of seqnum" errors and disconnects the device.
     fn handle_cmd_unlink_blocking(
         &self,
         rt: &tokio::runtime::Handle,
@@ -606,6 +643,18 @@ impl SocketBridge {
             "Processing CMD_UNLINK: seqnum={}, seqnum_unlink={}",
             header.seqnum, seqnum_unlink
         );
+
+        // ALWAYS track unlinked seqnums to suppress late responses
+        // This prevents "cannot find urb" kernel errors when server responses arrive late
+        rt.block_on(async {
+            let mut unlinked = self.unlinked_seqnums.write().await;
+            unlinked.insert(seqnum_unlink);
+            trace!(
+                "Tracking unlinked seqnum {}, total unlinked: {}",
+                seqnum_unlink,
+                unlinked.len()
+            );
+        });
 
         // Try to find and cancel the pending transfer
         let cancel_tx = rt.block_on(async {
@@ -626,12 +675,13 @@ impl SocketBridge {
                 0 // Success: transfer was cancelled
             }
             None => {
-                // Transfer not found - already completed
+                // Transfer not found - may be in flight to server
+                // We still need to suppress any late response (tracked above)
                 debug!(
-                    "Transfer already completed: seqnum_unlink={} (CMD_UNLINK seqnum={})",
+                    "Transfer in flight or completed: seqnum_unlink={} (CMD_UNLINK seqnum={})",
                     seqnum_unlink, header.seqnum
                 );
-                -2 // -ENOENT: not found (already completed)
+                -2 // -ENOENT: not found in pending list
             }
         };
 
@@ -651,48 +701,49 @@ impl SocketBridge {
     /// Per USB/IP protocol, RET_UNLINK consists of:
     /// - Header (20 bytes): command=0x0004, seqnum, devid, direction=0, ep=0
     /// - Payload (4 bytes): status (i32)
-    /// - Padding to match kernel struct alignment (16 bytes)
+    /// - Padding to match kernel struct alignment (24 bytes)
+    /// - Total: 48 bytes (same as RET_SUBMIT)
+    ///
+    /// IMPORTANT: We buffer the entire message and send it in a single write_all call
+    /// to ensure atomicity - either the whole message is sent or nothing is sent.
     fn send_ret_unlink_blocking(&self, seqnum: u32, status: i32) -> Result<()> {
+        // Build header
+        let header = UsbIpHeader::new(UsbIpCommand::RetUnlink, seqnum, self.devid);
+
+        // USB/IP header union is always 28 bytes (size of largest member: cmd_submit)
+        // RET_UNLINK only uses 4 bytes (status), rest must be padding
+        // We write 4 bytes for status, so pad with 24 bytes to reach 28
+        const RET_UNLINK_PADDING: usize = 24;
+        let total_size = UsbIpHeader::SIZE + UsbIpRetUnlink::SIZE + RET_UNLINK_PADDING;
+
+        // Build entire message in a single buffer
+        let mut message = Vec::with_capacity(total_size);
+
+        // Write header (20 bytes)
+        header.write_to(&mut message)?;
+
+        // Write RET_UNLINK payload (4 bytes)
+        let ret_unlink = UsbIpRetUnlink { status };
+        ret_unlink.write_to(&mut message)?;
+
+        // Write padding (24 bytes)
+        message.extend_from_slice(&[0u8; RET_UNLINK_PADDING]);
+
+        debug!(
+            "RET_UNLINK: seqnum={}, status={} ({}), total_msg_len={}",
+            seqnum,
+            status,
+            if status == 0 { "cancelled" } else { "not found" },
+            message.len()
+        );
+
+        // Send entire message atomically
         let mut socket = self
             .write_socket
             .lock()
             .map_err(|e| anyhow!("Failed to lock write_socket: {}", e))?;
 
-        // Write header (20 bytes) - pre-allocate with exact size
-        let header = UsbIpHeader::new(UsbIpCommand::RetUnlink, seqnum, self.devid);
-        let mut header_buf = Vec::with_capacity(UsbIpHeader::SIZE);
-        header.write_to(&mut header_buf)?;
-
-        debug!(
-            "Writing RET_UNLINK header: command={:#06x}, seqnum={}, devid={}",
-            header.command, header.seqnum, header.devid
-        );
-
-        socket.write_all(&header_buf)?;
-
-        // Write RET_UNLINK payload using the proper struct - pre-allocate with exact size
-        let ret_unlink = UsbIpRetUnlink { status };
-        let mut ret_buf = Vec::with_capacity(UsbIpRetUnlink::SIZE);
-        ret_unlink.write_to(&mut ret_buf)?;
-
-        debug!(
-            "Writing RET_UNLINK payload: status={} ({})",
-            status,
-            if status == 0 {
-                "cancelled"
-            } else {
-                "not found"
-            }
-        );
-
-        socket.write_all(&ret_buf)?;
-
-        // USB/IP header union is always 28 bytes (size of largest member: cmd_submit)
-        // RET_UNLINK only uses 4 bytes (status), rest must be padding
-        // We wrote 4 bytes for status, so pad with 24 bytes to reach 28
-        const RET_UNLINK_PADDING: usize = 24;
-        socket.write_all(&[0u8; RET_UNLINK_PADDING])?;
-
+        socket.write_all(&message)?;
         socket.flush()?;
 
         Ok(())

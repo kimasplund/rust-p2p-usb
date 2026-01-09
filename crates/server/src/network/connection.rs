@@ -167,6 +167,10 @@ impl ClientConnection {
             Self::keepalive_task(connection_clone, endpoint_id).await;
         });
 
+        // Use interval for periodic checks to avoid timer reset issues in select!
+        let mut session_check_interval = time::interval(Duration::from_secs(30));
+        session_check_interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+
         loop {
             let flush_delay = self
                 .notification_aggregator
@@ -215,7 +219,7 @@ impl ClientConnection {
                 }
 
                 // Check for expired sessions (every 30 seconds)
-                _ = time::sleep(Duration::from_secs(30)) => {
+                _ = session_check_interval.tick() => {
                     let idle_time = self.last_activity.elapsed();
                     if idle_time > Duration::from_secs(180) {
                         warn!("Connection idle for {:?}, closing", idle_time);
@@ -1237,6 +1241,9 @@ impl ClientConnection {
             {
                 let _ = rx.await;
             }
+
+            // Ensure session is removed from policy engine to prevent memory leak
+            self.policy_engine.unregister_session(handle).await;
         }
 
         self.attached_devices.clear();

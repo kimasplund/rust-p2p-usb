@@ -38,9 +38,6 @@ pub struct IrohServer {
     rate_limiter: Option<SharedRateLimiter>,
     /// Policy engine for time-based access control and passthrough policies
     policy_engine: Arc<PolicyEngine>,
-    /// Channel receiver for session expiration events (for future server-level handling)
-    #[allow(dead_code)]
-    session_expired_rx: mpsc::UnboundedReceiver<SessionExpiredEvent>,
 }
 
 impl IrohServer {
@@ -121,15 +118,10 @@ impl IrohServer {
         };
 
         // Create policy engine for time-based access control
-        let (session_expired_tx, session_expired_rx) = mpsc::unbounded_channel();
         let policy_engine = Arc::new(
             PolicyEngine::new(config.device_policies.clone())
-                .with_timezone_offset(config.timezone_offset_hours)
-                .with_expiration_channel(session_expired_tx),
+                .with_timezone_offset(config.timezone_offset_hours),
         );
-
-        // Spawn expiration monitor task
-        let _monitor_handle = policy_engine.clone().spawn_expiration_monitor();
 
         if !config.device_policies.is_empty() {
             info!(
@@ -146,7 +138,6 @@ impl IrohServer {
             audit_logger,
             rate_limiter,
             policy_engine,
-            session_expired_rx,
         })
     }
 

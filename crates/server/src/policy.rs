@@ -111,8 +111,6 @@ pub struct PolicyEngine {
     policies: Vec<DevicePolicy>,
     /// Active sessions being monitored
     active_sessions: Arc<Mutex<HashMap<DeviceHandle, ActiveSession>>>,
-    /// Callback for session expiration notifications
-    session_expired_tx: Option<tokio::sync::mpsc::UnboundedSender<SessionExpiredEvent>>,
     /// Timezone offset in hours from UTC (e.g., +2 for CEST)
     timezone_offset_hours: i32,
 }
@@ -145,7 +143,6 @@ impl PolicyEngine {
         Self {
             policies,
             active_sessions: Arc::new(Mutex::new(HashMap::new())),
-            session_expired_tx: None,
             timezone_offset_hours: 0,
         }
     }
@@ -153,15 +150,6 @@ impl PolicyEngine {
     /// Set the timezone offset for time window calculations
     pub fn with_timezone_offset(mut self, hours: i32) -> Self {
         self.timezone_offset_hours = hours;
-        self
-    }
-
-    /// Set the channel for session expiration events
-    pub fn with_expiration_channel(
-        mut self,
-        tx: tokio::sync::mpsc::UnboundedSender<SessionExpiredEvent>,
-    ) -> Self {
-        self.session_expired_tx = Some(tx);
         self
     }
 
@@ -479,40 +467,6 @@ impl PolicyEngine {
         }
 
         expired
-    }
-
-    /// Spawn a background task to monitor session expirations
-    ///
-    /// The task checks every 30 seconds for expired sessions and sends
-    /// expiration events through the configured channel.
-    pub fn spawn_expiration_monitor(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(30));
-
-            loop {
-                interval.tick().await;
-
-                let expired = self.check_expired_sessions().await;
-
-                for event in expired {
-                    info!(
-                        "Session expired for handle {:?} (device {:?}): {:?}",
-                        event.handle, event.device_id, event.reason
-                    );
-
-                    // Send notification if channel is configured
-                    if let Some(ref tx) = self.session_expired_tx {
-                        if tx.send(event.clone()).is_err() {
-                            warn!("Failed to send session expiration event");
-                        }
-                    }
-
-                    // Remove from active sessions
-                    let mut sessions = self.active_sessions.lock().await;
-                    sessions.remove(&event.handle);
-                }
-            }
-        })
     }
 
     /// Get count of active sessions (for debugging/monitoring)

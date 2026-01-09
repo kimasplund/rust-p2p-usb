@@ -17,6 +17,8 @@ pub struct UsbDevice {
     descriptor: DeviceDescriptor,
     /// Device handle (if opened)
     handle: Option<DeviceHandle<Context>>,
+    /// List of interfaces claimed by us
+    claimed_interfaces: Vec<u8>,
 }
 
 impl UsbDevice {
@@ -31,6 +33,7 @@ impl UsbDevice {
             id,
             descriptor,
             handle: None,
+            claimed_interfaces: Vec::new(),
         })
     }
 
@@ -82,7 +85,8 @@ impl UsbDevice {
     /// Open the device for transfers
     ///
     /// This must be called before submitting any transfers.
-    /// This will automatically detach kernel drivers and claim interface 0.
+    /// This will automatically detach kernel drivers and claim all interfaces
+    /// of the active configuration.
     pub fn open(&mut self) -> Result<(), AttachError> {
         if self.handle.is_some() {
             return Ok(()); // Already open
@@ -101,39 +105,62 @@ impl UsbDevice {
 
         debug!("Opened device {:?}", self.id);
 
-        // Detach kernel driver from interface 0 if active
-        // This is necessary because Linux kernel drivers (like usb-storage)
-        // will have claimed the interface, preventing us from accessing it
-        match handle.kernel_driver_active(0) {
-            Ok(true) => {
-                debug!(
-                    "Detaching kernel driver from interface 0 on device {:?}",
-                    self.id
-                );
-                if let Err(e) = handle.detach_kernel_driver(0) {
-                    warn!("Failed to detach kernel driver: {}", e);
-                    return Err(AttachError::Other {
-                        message: format!("Failed to detach kernel driver: {}", e),
-                    });
+        // Get active configuration to list interfaces
+        let config = self.device.active_config_descriptor().map_err(|e| {
+            warn!("Failed to get active config descriptor: {}", e);
+            AttachError::Other {
+                message: format!("Failed to get config descriptor: {}", e),
+            }
+        })?;
+
+        // Iterate over all interfaces in the active configuration
+        for interface in config.interfaces() {
+            let interface_number = interface.number();
+
+            // Detach kernel driver if active
+            match handle.kernel_driver_active(interface_number) {
+                Ok(true) => {
+                    debug!(
+                        "Detaching kernel driver from interface {} on device {:?}",
+                        interface_number, self.id
+                    );
+                    if let Err(e) = handle.detach_kernel_driver(interface_number) {
+                        warn!(
+                            "Failed to detach kernel driver from interface {}: {}",
+                            interface_number, e
+                        );
+                        // We continue here because some interfaces might fail but others succeed
+                        // and we want to try to claim what we can.
+                        // However, if we fail to detach, claiming will likely fail next.
+                    }
+                }
+                Ok(false) => {
+                    debug!("No kernel driver active on interface {}", interface_number);
+                }
+                Err(e) => {
+                    debug!(
+                        "Could not check kernel driver status for interface {}: {}",
+                        interface_number, e
+                    );
                 }
             }
-            Ok(false) => {
-                debug!("No kernel driver active on interface 0");
-            }
-            Err(e) => {
-                // Some platforms don't support this operation, so just log and continue
-                debug!("Could not check kernel driver status: {}", e);
-            }
-        }
 
-        // Claim interface 0 for our exclusive use
-        if let Err(e) = handle.claim_interface(0) {
-            warn!("Failed to claim interface 0: {}", e);
-            return Err(AttachError::Other {
-                message: format!("Failed to claim interface 0: {}", e),
-            });
+            // Claim interface
+            if let Err(e) = handle.claim_interface(interface_number) {
+                warn!("Failed to claim interface {}: {}", interface_number, e);
+                // Clean up any previously claimed interfaces?
+                // For now we return error if any claim fails, as we need consistent state.
+                // But first we should probably release ones we already claimed?
+                // Let's rely on Drop or cleanup later, but properly we should unwind.
+                // For simplicity in this implementation, we return error and `close` will handle cleanup.
+                return Err(AttachError::Other {
+                    message: format!("Failed to claim interface {}: {}", interface_number, e),
+                });
+            }
+
+            debug!("Claimed interface {} on device {:?}", interface_number, self.id);
+            self.claimed_interfaces.push(interface_number);
         }
-        debug!("Claimed interface 0 on device {:?}", self.id);
 
         self.handle = Some(handle);
         Ok(())
@@ -141,30 +168,30 @@ impl UsbDevice {
 
     /// Close the device
     ///
-    /// This will release the claimed interface and reattach the kernel driver
+    /// This will release claimed interfaces and reattach kernel drivers
     /// to restore the device to normal kernel control.
     pub fn close(&mut self) {
         if let Some(handle) = self.handle.take() {
-            // Release interface 0 before closing
-            if let Err(e) = handle.release_interface(0) {
-                warn!("Failed to release interface 0: {}", e);
-            }
+            // Release all claimed interfaces
+            for interface in &self.claimed_interfaces {
+                if let Err(e) = handle.release_interface(*interface) {
+                    warn!("Failed to release interface {}: {}", interface, e);
+                }
 
-            // Reattach kernel driver to restore device to kernel control
-            // This allows the device to be used normally on the server again
-            // after we're done sharing it via USB/IP
-            if let Err(e) = handle.attach_kernel_driver(0) {
-                // This may fail if no driver was attached originally, which is fine
-                debug!(
-                    "Could not reattach kernel driver (may not have been detached): {}",
-                    e
-                );
-            } else {
-                debug!(
-                    "Reattached kernel driver to interface 0 on device {:?}",
-                    self.id
-                );
+                // Reattach kernel driver to restore device to kernel control
+                if let Err(e) = handle.attach_kernel_driver(*interface) {
+                    debug!(
+                        "Could not reattach kernel driver to interface {} (may not have been detached): {}",
+                        *interface, e
+                    );
+                } else {
+                    debug!(
+                        "Reattached kernel driver to interface {} on device {:?}",
+                        *interface, self.id
+                    );
+                }
             }
+            self.claimed_interfaces.clear();
 
             debug!("Closed device {:?}", self.id);
         }

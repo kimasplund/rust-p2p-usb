@@ -135,12 +135,69 @@ fn execute_control_transfer(
                 buffer.truncate(len);
                 Ok(buffer)
             }
+            Err(rusb::Error::Pipe) => {
+                // Control endpoint stalled - clear the stall and retry
+                // This can happen if a previous command wasn't fully processed
+                warn!("Control IN pipe error, clearing stall on EP0 and retrying");
+                if let Err(clear_err) = handle.clear_halt(0x80) {
+                    // 0x80 = EP0 IN direction
+                    warn!("Failed to clear halt on control EP0 IN: {:?}", clear_err);
+                    // Try clearing EP0 without direction bit
+                    let _ = handle.clear_halt(0x00);
+                }
+                // Retry the transfer
+                let mut buffer = vec![0u8; buffer_size];
+                match handle.read_control(
+                    request_type,
+                    request,
+                    value,
+                    index,
+                    &mut buffer,
+                    DEFAULT_TIMEOUT,
+                ) {
+                    Ok(len) => {
+                        buffer.truncate(len);
+                        debug!("Control IN succeeded after clearing stall");
+                        Ok(buffer)
+                    }
+                    Err(e) => {
+                        warn!("Control IN failed even after clearing stall: {:?}", e);
+                        Err(map_rusb_error(e))
+                    }
+                }
+            }
             Err(e) => Err(map_rusb_error(e)),
         }
     } else {
         // OUT transfer: write to device
         match handle.write_control(request_type, request, value, index, &data, DEFAULT_TIMEOUT) {
             Ok(_len) => Ok(Vec::new()), // OUT transfers return no data
+            Err(rusb::Error::Pipe) => {
+                // Control endpoint stalled - clear the stall and retry
+                warn!("Control OUT pipe error, clearing stall on EP0 and retrying");
+                if let Err(clear_err) = handle.clear_halt(0x00) {
+                    // 0x00 = EP0 OUT direction
+                    warn!("Failed to clear halt on control EP0 OUT: {:?}", clear_err);
+                }
+                // Retry the transfer
+                match handle.write_control(
+                    request_type,
+                    request,
+                    value,
+                    index,
+                    &data,
+                    DEFAULT_TIMEOUT,
+                ) {
+                    Ok(_len) => {
+                        debug!("Control OUT succeeded after clearing stall");
+                        Ok(Vec::new())
+                    }
+                    Err(e) => {
+                        warn!("Control OUT failed even after clearing stall: {:?}", e);
+                        Err(map_rusb_error(e))
+                    }
+                }
+            }
             Err(e) => Err(map_rusb_error(e)),
         }
     };

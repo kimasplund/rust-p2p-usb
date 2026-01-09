@@ -149,14 +149,39 @@ fn execute_control_transfer(
                     return TransferResult::Success { data: vec![0x00] };
                 }
 
+                // GET_DESCRIPTOR for DEVICE_QUALIFIER (0x06):
+                // Many USB devices return STALL for DEVICE_QUALIFIER descriptor
+                // when they don't support dual-speed (High/Full) operation.
+                // This is normal behavior - return the STALL error but don't warn.
+                if request_type == 0x80 && request == 0x06 {
+                    let descriptor_type = (value >> 8) as u8;
+                    if descriptor_type == 0x06 {
+                        // DEVICE_QUALIFIER descriptor - STALL is expected
+                        trace!(
+                            "GET_DESCRIPTOR(DEVICE_QUALIFIER) stalled - device doesn't support other speed"
+                        );
+                        return TransferResult::Error {
+                            error: UsbError::Pipe,
+                        };
+                    }
+                    // OTHER_SPEED_CONFIGURATION (0x07) also commonly STALLs
+                    if descriptor_type == 0x07 {
+                        trace!(
+                            "GET_DESCRIPTOR(OTHER_SPEED_CONFIG) stalled - device doesn't support other speed"
+                        );
+                        return TransferResult::Error {
+                            error: UsbError::Pipe,
+                        };
+                    }
+                }
+
                 warn!(
                     "Control IN pipe error: request_type={:#x}, request={:#x}, value={:#x}, index={:#x}",
                     request_type, request, value, index
                 );
 
-                // For other control transfers, try device reset if available
+                // For other control transfers, report the error
                 // Note: clear_halt on EP0 typically doesn't work (returns NotFound)
-                // so we just report the error for non-GET_MAX_LUN cases
                 Err(UsbError::Pipe)
             }
             Err(e) => Err(map_rusb_error(e)),
